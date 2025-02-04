@@ -1,6 +1,6 @@
 [package]
 name = "foxglove"
-version = "0.1.0"
+version = "0.1.1"
 description = "Foxglove SDK"
 edition = "2021"
 repository = "https://github.com/foxglove/foxglove-sdk"
