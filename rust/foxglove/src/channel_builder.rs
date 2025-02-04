@@ -17,6 +17,7 @@ pub struct ChannelBuilder<'a> {
 }
 
 impl<'a> ChannelBuilder<'a> {
+    /// Creates a new channel builder for the specified topic.
     pub fn new<T: Into<String>>(topic: T) -> Self {
         Self {
             topic: topic.into(),
@@ -74,7 +75,7 @@ impl<'a> ChannelBuilder<'a> {
             topic: self.topic,
             message_encoding: self
                 .message_encoding
-                .ok_or_else(|| FoxgloveError::Fatal("Message encoding is required".to_string()))?,
+                .ok_or_else(|| FoxgloveError::MessageEncodingRequired)?,
             schema: self.schema,
             metadata: self.metadata,
         });

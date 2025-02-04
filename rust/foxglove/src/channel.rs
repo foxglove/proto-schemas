@@ -44,6 +44,7 @@ pub struct Schema {
 }
 
 impl Schema {
+    /// Returns a new schema.
     pub fn new(
         name: impl Into<String>,
         encoding: impl Into<String>,
@@ -90,27 +91,32 @@ pub struct Channel {
 }
 
 impl Channel {
+    /// Returns the channel ID.
     pub fn id(&self) -> ChannelId {
         self.id
     }
 
+    /// Returns the channel topic.
     pub fn topic(&self) -> &str {
         &self.topic
     }
 
+    /// Returns the channel schema.
     pub fn schema(&self) -> Option<&Schema> {
         self.schema.as_ref()
     }
 
+    /// Atomically increments and returns the next message sequence number.
     pub fn next_sequence(&self) -> u32 {
         self.message_sequence.fetch_add(1, Relaxed)
     }
 
+    /// Logs a message.
     pub fn log(self: &Arc<Self>, msg: &[u8]) {
-        self.log_with_meta(msg, PartialMetadata::new());
+        self.log_with_meta(msg, PartialMetadata::default());
     }
 
-    // Log a message to all sinks. Logs a warning for any errors.
+    /// Logs a message with additional metadata.
     pub fn log_with_meta(self: &Arc<Self>, msg: &[u8], opts: PartialMetadata) {
         // Bail out early if there are no sinks (logging is disabled).
         if self.sinks.is_empty() {
@@ -131,7 +137,7 @@ impl Channel {
     }
 }
 
-// For tests
+#[cfg(test)]
 impl PartialEq for Channel {
     fn eq(&self, other: &Self) -> bool {
         self.topic == other.topic
@@ -142,6 +148,7 @@ impl PartialEq for Channel {
     }
 }
 
+#[cfg(test)]
 impl Eq for Channel {}
 
 impl std::fmt::Debug for Channel {

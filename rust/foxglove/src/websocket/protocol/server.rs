@@ -31,34 +31,47 @@ pub struct Advertisement<'a> {
     pub schema_encoding: Option<&'a str>,
 }
 
+/// A parameter type.
 #[cfg(feature = "unstable")]
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ParameterType {
+    /// A byte array, encoded as a base64-encoded string.
     ByteArray,
+    /// A decimal or integer value that can be represented as a `float64`.
     Float64,
+    /// An array of decimal or integer values that can be represented as `float64`s.
     Float64Array,
 }
 
+/// A parameter value.
 #[cfg(feature = "unstable")]
 #[serde_as]
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum ParameterValue {
+    /// A decimal or integer value.
     Number(f64),
+    /// A boolean value.
     Bool(bool),
-    /// Base64-encoded byte array
+    /// A byte array, encoded as a base64-encoded string.
     String(#[serde_as(as = "Base64")] Vec<u8>),
+    /// An array of parameter values.
     Array(Vec<ParameterValue>),
+    /// An associative map of parameter values.
     Dict(HashMap<String, ParameterValue>),
 }
 
+/// Informs the client about a parameter.
 #[cfg(feature = "unstable")]
 #[derive(Serialize)]
 pub struct Parameter {
+    /// The name of the parameter.
     pub name: String,
+    /// The parameter value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<ParameterValue>,
+    /// The parameter type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub r#type: Option<ParameterType>,
 }
@@ -96,10 +109,13 @@ pub struct Status {
     pub id: Option<String>,
 }
 
+/// A capability that the websocket server advertises to its clients.
 #[derive(Debug, Serialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub enum Capability {
+    /// Allow clients to advertise channels to send data messages to the server.
     ClientPublish,
+    /// Allow clients to get & set parameters.
     #[cfg(feature = "unstable")]
     Parameters,
 }
@@ -125,14 +141,15 @@ pub fn server_info(
 // https://github.com/foxglove/ws-protocol/blob/main/docs/spec.md#advertise
 // Caller must check that the channel has a schema, otherwise this will panic.
 pub fn advertisement(channel: &Channel) -> Result<String, FoxgloveError> {
-    let schema = &channel.schema.as_ref().ok_or_else(|| {
-        FoxgloveError::Fatal("a schema is required for WebSocket protocol".to_string())
-    })?;
+    let schema = &channel
+        .schema
+        .as_ref()
+        .ok_or_else(|| FoxgloveError::SchemaRequired)?;
 
     let schema_data = match schema.encoding.as_str() {
         "protobuf" => BASE64_STANDARD.encode(&schema.data),
         _ => String::from_utf8(schema.data.to_vec())
-            .map_err(|e| FoxgloveError::Fatal(e.to_string()))?,
+            .map_err(|e| FoxgloveError::Unspecified(e.into()))?,
     };
 
     Ok(json!({

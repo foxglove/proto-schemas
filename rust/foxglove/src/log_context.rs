@@ -13,6 +13,7 @@ pub struct LogContext {
 }
 
 impl LogContext {
+    /// Instantiates a new log context.
     pub fn new() -> Self {
         Self {
             channels: RwLock::new(HashMap::new()),
@@ -20,16 +21,21 @@ impl LogContext {
         }
     }
 
+    /// Returns a reference to the global log context.
+    ///
+    /// If there is no global log context, this function instantiates one.
     pub fn global() -> &'static LogContext {
         static DEFAULT_CONTEXT: OnceLock<LogContext> = OnceLock::new();
         DEFAULT_CONTEXT.get_or_init(LogContext::new)
     }
 
+    /// Returns the channel for the specified topic, if there is one.
     pub fn get_channel_by_topic(&self, topic: &str) -> Option<Arc<Channel>> {
         let channels = self.channels.read();
         channels.get(topic).cloned()
     }
 
+    /// Adds a channel to the log context.
     pub fn add_channel(&self, channel: Arc<Channel>) -> Result<(), FoxgloveError> {
         {
             // Wrapped in a block, so we release the lock immediately.
@@ -49,6 +55,7 @@ impl LogContext {
         Ok(())
     }
 
+    /// Removes the channel for the specified topic.
     pub fn remove_channel_for_topic(&self, topic: &str) -> bool {
         let maybe_channel_by_topic = {
             let mut channels = self.channels.write();
@@ -70,6 +77,7 @@ impl LogContext {
         true
     }
 
+    /// Adds a sink to the log context.
     pub fn add_sink(&self, sink: Arc<dyn LogSink>) -> bool {
         if !self.sinks.add_sink(sink.clone()) {
             return false;
@@ -85,6 +93,7 @@ impl LogContext {
         true
     }
 
+    /// Removes a sink from the log context.
     pub fn remove_sink(&self, sink: &Arc<dyn LogSink>) -> bool {
         if !self.sinks.remove_sink(sink) {
             return false;
@@ -110,6 +119,7 @@ impl LogContext {
         true
     }
 
+    /// Removes all channels and sinks from the log context.
     pub fn clear(&self) {
         let channels: HashMap<_, _> = std::mem::take(&mut self.channels.write());
         self.sinks.for_each(|sink| {

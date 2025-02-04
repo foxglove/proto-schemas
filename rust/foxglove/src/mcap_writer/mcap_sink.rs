@@ -103,10 +103,7 @@ impl<W: Write + Seek + Send> LogSink for McapSink<W> {
     ) -> Result<(), FoxgloveError> {
         _ = metadata;
         let mut guard = self.0.lock();
-        let writer = guard
-            .as_mut()
-            .ok_or(FoxgloveError::Fatal("File writer is closed".to_string()))?;
-
+        let writer = guard.as_mut().ok_or(FoxgloveError::SinkClosed)?;
         writer.log(channel, msg, metadata)
     }
 }

@@ -131,6 +131,7 @@ impl Default for Server {
 /// Provides a mechanism for registering callbacks for
 /// handling client message events.
 pub trait ServerListener: Send + Sync {
+    /// Callback invoked when a client message is received.
     fn on_message_data(&self, channel_id: ClientChannelId, payload: &[u8]);
 }
 
@@ -321,20 +322,18 @@ impl Server {
     // Spawn a task to accept all incoming connections and return
     pub async fn start(&self, host: &str, port: u16) -> Result<String, FoxgloveError> {
         if self.started.load(Acquire) {
-            return Err(FoxgloveError::Fatal("Server already started".to_string()));
+            return Err(FoxgloveError::ServerAlreadyStarted);
         }
         let already_started = self.started.swap(true, AcqRel);
         assert!(!already_started);
 
         let addr = format!("{}:{}", host, port);
-        let listener = TcpListener::bind(&addr).await.map_err(|err| {
-            FoxgloveError::Fatal(format!("Failed to bind TCP listener: {}", &err))
-        })?;
+        let listener = TcpListener::bind(&addr)
+            .await
+            .map_err(FoxgloveError::Bind)?;
         let bound_addr = listener
             .local_addr()
-            .map_err(|err| {
-                FoxgloveError::Fatal(format!("Failed to get listener address: {}", &err))
-            })?
+            .map_err(|err| FoxgloveError::Unspecified(err.into()))?
             .to_string();
 
         let cancellation_token = self.cancellation_token.clone();

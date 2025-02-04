@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 
 type Error = Box<dyn std::error::Error>;
 
+/// A client channel ID.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
 pub struct ClientChannelId(u32);
 
 impl ClientChannelId {
+    /// Creates a new client channel ID.
     pub fn new(id: u32) -> Self {
         Self(id)
     }

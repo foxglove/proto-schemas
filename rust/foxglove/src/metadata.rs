@@ -38,13 +38,3 @@ pub struct Metadata {
     /// If omitted, log time is used.
     pub publish_time: u64,
 }
-
-impl PartialMetadata {
-    pub const fn new() -> Self {
-        Self {
-            sequence: None,
-            log_time: None,
-            publish_time: None,
-        }
-    }
-}

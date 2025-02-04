@@ -154,6 +154,8 @@
 //!
 //! [tokio]: https://docs.rs/tokio/latest/tokio/
 
+#![warn(missing_docs)]
+
 use thiserror::Error;
 
 mod channel;
@@ -197,9 +199,24 @@ pub use websocket_server::{WebSocketServer, WebSocketServerHandle};
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum FoxgloveError {
-    /// A unspecified unrecoverable error.
-    #[error("Fatal error: {0}")]
-    Fatal(String),
+    /// An unspecified error.
+    #[error("{0}")]
+    Unspecified(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
+    /// The sink dropped a message because it is closed.
+    #[error("Sink closed")]
+    SinkClosed,
+    /// A schema is required.
+    #[error("Schema is required")]
+    SchemaRequired,
+    /// A message encoding is required.
+    #[error("Message encoding is required")]
+    MessageEncodingRequired,
+    /// The server was already started.
+    #[error("Server already started")]
+    ServerAlreadyStarted,
+    /// Failed to bind to the specified host and port.
+    #[error("Failed to bind port: {0}")]
+    Bind(std::io::Error),
     /// A channel for the same topic has already been registered.
     #[error("Channel for topic {0} already exists in registry")]
     DuplicateChannel(String),

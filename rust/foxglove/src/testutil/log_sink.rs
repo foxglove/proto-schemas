@@ -53,6 +53,15 @@ impl LogSink for RecordingSink {
 
 pub struct ErrorSink;
 
+#[derive(Debug, thiserror::Error)]
+struct StrError(&'static str);
+
+impl std::fmt::Display for StrError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
 impl LogSink for ErrorSink {
     fn log(
         &self,
@@ -60,6 +69,8 @@ impl LogSink for ErrorSink {
         _msg: &[u8],
         _metadata: &Metadata,
     ) -> Result<(), FoxgloveError> {
-        Err(FoxgloveError::Fatal("ErrorSink always fails".to_string()))
+        Err(FoxgloveError::Unspecified(Box::new(StrError(
+            "ErrorSink always fails",
+        ))))
     }
 }
