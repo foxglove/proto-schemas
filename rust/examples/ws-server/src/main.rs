@@ -18,7 +18,6 @@ static_typed_channel!(pub BOX_CHANNEL, "/boxes", SceneUpdate);
 static_typed_channel!(pub TF_CHANNEL, "/tf", FrameTransform);
 static_typed_channel!(pub MSG_CHANNEL, "/msg", Message);
 
-#[allow(dead_code)]
 async fn log_forever(fps: u8) {
     let mut counter: u32 = 0;
     let mut interval = tokio::time::interval(Duration::from_millis(1000 / u64::from(fps)));

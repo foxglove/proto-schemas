@@ -6,9 +6,9 @@ pub use crate::websocket::protocol::client::ClientChannelId;
 use crate::websocket::protocol::client::{
     ClientChannel, ClientMessage, Subscription, SubscriptionId,
 };
-pub use crate::websocket::protocol::server::{Capability, Status, StatusLevel};
-#[cfg(feature = "unstable")]
-pub use crate::websocket::protocol::server::{Parameter, ParameterType, ParameterValue};
+pub use crate::websocket::protocol::server::{
+    Capability, Parameter, ParameterType, ParameterValue, Status, StatusLevel,
+};
 use crate::{get_runtime_handle, Channel, FoxgloveError, LogSink, Metadata};
 use bimap::BiHashMap;
 use bytes::{BufMut, BytesMut};
@@ -148,6 +148,8 @@ pub(crate) struct Server {
     listener: Option<Arc<dyn ServerListener>>,
     /// Capabilities advertised to clients
     capabilities: HashSet<Capability>,
+    /// Parameters subscribed to by clients
+    subscribed_parameters: parking_lot::Mutex<HashSet<String>>,
     /// Encodings server can accept from clients. Ignored unless the "clientPublish" capability is set.
     supported_encodings: HashSet<String>,
     /// Token for cancelling all tasks
@@ -171,10 +173,36 @@ pub trait ServerListener: Send + Sync {
     /// Callback invoked when a client unsubscribes from a channel.
     /// Only invoked for channels that had an active subscription from the client.
     fn on_unsubscribe(&self, _client: Client, _channel: ChannelView) {}
-    /// Callback invoked when a client advertises a client channel. Requires the "clientPublish" capability.
+    /// Callback invoked when a client advertises a client channel. Requires [`Capability::ClientPublish`].
     fn on_client_advertise(&self, _client: Client, _channel: ClientChannelView) {}
-    /// Callback invoked when a client unadvertises a client channel. Requires the "clientPublish" capability.
+    /// Callback invoked when a client unadvertises a client channel. Requires [`Capability::ClientPublish`].
     fn on_client_unadvertise(&self, _client: Client, _channel: ClientChannelView) {}
+    /// Callback invoked when a client requests parameters. Requires [`Capability::Parameters`].
+    /// Should return the named paramters, or all paramters if param_names is empty.
+    fn on_get_parameters(
+        &self,
+        _client: Client,
+        _param_names: Vec<String>,
+        _request_id: Option<&str>,
+    ) -> Vec<Parameter> {
+        Vec::new()
+    }
+    /// Callback invoked when a client sets parameters. Requires [`Capability::Parameters`].
+    /// Should return the updated parameters for the passed parameters.
+    /// The implementation could return the modified parameters.
+    /// All clients subscribed to updates for the _returned_ parameters will be notified.
+    fn on_set_parameters(
+        &self,
+        _client: Client,
+        parameters: Vec<Parameter>,
+        _request_id: Option<&str>,
+    ) -> Vec<Parameter> {
+        parameters
+    }
+    /// Callback invoked when a client subscribes to parameters. Requires [`Capability::ParametersSubscribe`].
+    fn on_parameters_subscribe(&self, _param_names: Vec<String>) {}
+    /// Callback invoked when a client unsubscribes from parameters. Requires [`Capability::ParametersSubscribe`].
+    fn on_parameters_unsubscribe(&self, _param_names: Vec<String>) {}
 }
 
 /// A connected client session with the websocket server.
@@ -191,6 +219,8 @@ struct ConnectedClient {
     subscriptions: parking_lot::Mutex<BiHashMap<ChannelId, SubscriptionId>>,
     /// Channels advertised by this client
     advertised_channels: parking_lot::Mutex<HashMap<ClientChannelId, Arc<ClientChannel>>>,
+    /// Parameters subscribed to by this client
+    parameter_subscriptions: parking_lot::Mutex<HashSet<String>>,
     /// Optional callback handler for a server implementation
     server_listener: Option<Arc<dyn ServerListener>>,
     server: Weak<Server>,
@@ -227,12 +257,25 @@ impl ConnectedClient {
         let Some(server) = self.server.upgrade() else {
             return;
         };
+
         match msg {
             ClientMessage::Subscribe(msg) => self.on_subscribe(server, msg.subscriptions),
             ClientMessage::Unsubscribe(msg) => self.on_unsubscribe(server, msg.subscription_ids),
             ClientMessage::Advertise(msg) => self.on_advertise(server, msg.channels),
             ClientMessage::Unadvertise(msg) => self.on_unadvertise(msg.channel_ids),
             ClientMessage::MessageData(msg) => self.on_message_data(msg),
+            ClientMessage::GetParameters(msg) => {
+                self.on_get_parameters(server, msg.parameter_names, msg.id)
+            }
+            ClientMessage::SetParameters(msg) => {
+                self.on_set_parameters(server, msg.parameters, msg.id)
+            }
+            ClientMessage::SubscribeParameterUpdates(msg) => {
+                self.on_parameters_subscribe(server, msg.parameter_names)
+            }
+            ClientMessage::UnsubscribeParameterUpdates(msg) => {
+                self.on_parameters_unsubscribe(server, msg.parameter_names)
+            }
             _ => {
                 tracing::error!("Unsupported message from {}: {}", self.addr, msg.op());
                 self.send_error(format!("Unsupported message: {}", msg.op()));
@@ -470,6 +513,144 @@ impl ConnectedClient {
         }
     }
 
+    fn on_get_parameters(
+        &self,
+        server: Arc<Server>,
+        param_names: Vec<String>,
+        request_id: Option<String>,
+    ) {
+        if !server.capabilities.contains(&Capability::Parameters) {
+            self.send_error("Server does not support parameters capability".to_string());
+            return;
+        }
+
+        if let Some(handler) = self.server_listener.as_ref() {
+            let request_id = request_id.as_deref();
+            let parameters = handler.on_get_parameters(Client(self), param_names, request_id);
+            let message = protocol::server::parameters_json(&parameters, request_id);
+            let _ = self.control_plane_tx.try_send(Message::text(message));
+        }
+    }
+
+    fn on_set_parameters(
+        &self,
+        server: Arc<Server>,
+        parameters: Vec<Parameter>,
+        request_id: Option<String>,
+    ) {
+        if !server.capabilities.contains(&Capability::Parameters) {
+            self.send_error("Server does not support parameters capability".to_string());
+            return;
+        }
+
+        let updated_parameters = if let Some(handler) = self.server_listener.as_ref() {
+            let request_id = request_id.as_deref();
+            let updated_parameters =
+                handler.on_set_parameters(Client(self), parameters, request_id);
+            // Send all the updated_parameters back to the client if request_id is provided.
+            // This is the behavior of the reference Python server implementation.
+            if request_id.is_some() {
+                let message = protocol::server::parameters_json(&updated_parameters, request_id);
+                self.send_control_msg(Message::text(message));
+            }
+            updated_parameters
+        } else {
+            // This differs from the Python reference implementation in that here we notify
+            // subscribers about the parameters even if there's no ServerListener configured.
+            // This seems to be a more sensible default.
+            parameters
+        };
+        server.publish_parameter_values(updated_parameters);
+    }
+
+    fn update_parameters(&self, parameters: &[Parameter]) {
+        // Hold the lock for as short a time as possible
+        let subscribed_parameters: Vec<Parameter> = {
+            let subscribed_parameters = self.parameter_subscriptions.lock();
+            // Filter parameters to only send the ones the client is subscribed to
+            parameters
+                .iter()
+                .filter(|p| subscribed_parameters.contains(&p.name))
+                .cloned()
+                .collect()
+        };
+        if subscribed_parameters.is_empty() {
+            return;
+        }
+        let message = protocol::server::parameters_json(&subscribed_parameters, None);
+        self.send_control_msg(Message::text(message));
+    }
+
+    fn on_parameters_subscribe(&self, server: Arc<Server>, param_names: Vec<String>) {
+        if !server
+            .capabilities
+            .contains(&Capability::ParametersSubscribe)
+        {
+            self.send_error("Server does not support parametersSubscribe capability".to_string());
+            return;
+        }
+
+        // Get the list of which subscriptions are new to the server (first time subscriptions)
+        // This must come before modifying self.paramter_subscriptions for it to sync
+        // correctly with on_parameters_unsubscribe.
+        let mut new_param_subscriptions = Vec::with_capacity(param_names.len());
+        {
+            let mut subscribed_parameters = server.subscribed_parameters.lock();
+            for name in param_names.iter() {
+                if subscribed_parameters.insert(name.clone()) {
+                    new_param_subscriptions.push(name.clone());
+                }
+            }
+        }
+        // Track the client's own subscriptions
+        {
+            let mut subscribed_parameters = self.parameter_subscriptions.lock();
+            subscribed_parameters.extend(param_names);
+        }
+        if new_param_subscriptions.is_empty() {
+            return;
+        }
+        if let Some(handler) = self.server_listener.as_ref() {
+            handler.on_parameters_subscribe(new_param_subscriptions);
+        }
+    }
+
+    fn on_parameters_unsubscribe(&self, server: Arc<Server>, mut param_names: Vec<String>) {
+        if !server
+            .capabilities
+            .contains(&Capability::ParametersSubscribe)
+        {
+            self.send_error("Server does not support parametersSubscribe capability".to_string());
+            return;
+        }
+
+        // Remove the parameter subscriptions for this client,
+        // and filter out any we weren't subscribed to
+        {
+            let mut subscribed_parameters = self.parameter_subscriptions.lock();
+            param_names.retain(|name| subscribed_parameters.remove(name));
+        }
+        if param_names.is_empty() {
+            // We didn't remove any subscriptions
+            return;
+        }
+        let Some(handler) = self.server_listener.as_ref() else {
+            return;
+        };
+
+        let unsubscribed_parameters = {
+            let mut subscribed_parameters = server.subscribed_parameters.lock();
+            // With the server-wide lock held, which prevents new subscriptions,
+            // get the parameters without any subscibers
+            let mut unsubscribed_parameters = server.parameters_without_subscription(param_names);
+            // Remove the unsubscribed parameters from the server's list of subscribed parameters
+            unsubscribed_parameters.retain(|name| subscribed_parameters.remove(name));
+            unsubscribed_parameters
+        };
+
+        handler.on_parameters_unsubscribe(unsubscribed_parameters);
+    }
+
     /// Send an ad hoc error status message to the client, with the given message.
     fn send_error(&self, message: String) {
         self.send_status(Status::new(StatusLevel::Error, message));
@@ -531,6 +712,7 @@ impl Server {
             clients: CowVec::new(),
             channels: parking_lot::RwLock::new(HashMap::new()),
             capabilities: opts.capabilities.unwrap_or_default(),
+            subscribed_parameters: parking_lot::Mutex::new(HashSet::new()),
             supported_encodings: opts.supported_encodings.unwrap_or_default(),
             cancellation_token: CancellationToken::new(),
         }
@@ -646,6 +828,18 @@ impl Server {
         }
     }
 
+    /// Filter param_names to just those with no subscribers
+    fn parameters_without_subscription(&self, mut param_names: Vec<String>) -> Vec<String> {
+        let clients = self.clients.get();
+        for client in clients.iter() {
+            let subscribed_parameters = client.parameter_subscriptions.lock();
+            // Remove any parameters that are already subscribed to by this client
+            param_names.retain(|name| !subscribed_parameters.contains(name));
+        }
+        // The remaining parameters are those with no subscribers
+        param_names
+    }
+
     /// Publish the current timestamp to all clients.
     #[cfg(feature = "unstable")]
     pub async fn broadcast_time(&self, timestamp_nanos: u64) {
@@ -667,31 +861,15 @@ impl Server {
     }
 
     /// Publish parameter values to all clients.
-    #[cfg(feature = "unstable")]
-    pub async fn publish_parameter_values(
-        &self,
-        parameters: Vec<Parameter>,
-        client_addr: Option<SocketAddr>,
-    ) {
+    pub fn publish_parameter_values(&self, parameters: Vec<Parameter>) {
         if !self.capabilities.contains(&Capability::Parameters) {
             tracing::error!("Server does not support parameters capability");
             return;
         }
 
-        let message = match protocol::server::parameters_json(parameters, None) {
-            Ok(message) => message,
-            Err(err) => {
-                tracing::error!("Failed to serialize parameter values: {err}");
-                return;
-            }
-        };
-        // FG-9994: This should only send to clients that have subscribed to the parameters.
         let clients = self.clients.get();
         for client in clients.iter() {
-            if client_addr.is_some_and(|addr| addr != client.addr) {
-                continue;
-            }
-            client.send_control_msg(Message::text(message.clone()));
+            client.update_parameters(&parameters);
         }
     }
 
@@ -776,6 +954,7 @@ impl Server {
             control_plane_rx: ctrl_rx,
             subscriptions: parking_lot::Mutex::new(BiHashMap::new()),
             advertised_channels: parking_lot::Mutex::new(HashMap::new()),
+            parameter_subscriptions: parking_lot::Mutex::new(HashSet::new()),
             server_listener: self.listener.clone(),
             server: self.weak_self.clone(),
         });

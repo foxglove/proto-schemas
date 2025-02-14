@@ -1,8 +1,7 @@
 use std::{error::Error, fmt::Display};
+mod logging;
 
 use crate::FoxgloveError;
-
-mod logging;
 
 #[derive(Debug, thiserror::Error)]
 struct SourceError(&'static str);

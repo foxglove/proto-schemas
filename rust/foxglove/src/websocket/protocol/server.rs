@@ -2,8 +2,7 @@ use crate::channel::Channel;
 use crate::channel::ChannelId;
 use crate::FoxgloveError;
 use base64::prelude::*;
-use serde::Deserialize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_repr::Serialize_repr;
 use serde_with::{base64::Base64, serde_as};
@@ -31,7 +30,7 @@ pub struct Advertisement<'a> {
 }
 
 /// A parameter type.
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ParameterType {
     /// A byte array, encoded as a base64-encoded string.
@@ -44,7 +43,7 @@ pub enum ParameterType {
 
 /// A parameter value.
 #[serde_as]
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ParameterValue {
     /// A decimal or integer value.
@@ -60,28 +59,27 @@ pub enum ParameterValue {
 }
 
 /// Informs the client about a parameter.
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Parameter {
     /// The name of the parameter.
     pub name: String,
-    /// The parameter value.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<ParameterValue>,
     /// The parameter type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub r#type: Option<ParameterType>,
+    /// The parameter value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<ParameterValue>,
 }
 
-#[cfg(feature = "unstable")]
 #[derive(Serialize)]
 #[serde(tag = "op")]
 #[serde(rename_all = "camelCase")]
 #[serde(rename_all_fields = "camelCase")]
-pub enum ServerMessage {
+pub enum ServerMessage<'a> {
     ParameterValues {
         #[serde(skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        parameters: Vec<Parameter>,
+        id: Option<&'a str>,
+        parameters: &'a Vec<Parameter>,
     },
 }
 
@@ -121,8 +119,8 @@ impl Status {
     }
 
     /// Sets the status message ID, so that this status can be replaced or removed in the future.
-    pub fn with_id(mut self, id: String) -> Self {
-        self.id = Some(id);
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
         self
     }
 }
@@ -142,8 +140,10 @@ pub enum Capability {
     /// Allow clients to advertise channels to send data messages to the server.
     ClientPublish,
     /// Allow clients to get & set parameters.
-    #[cfg(feature = "unstable")]
     Parameters,
+    /// Allow clients to subscribe and unsubscribe from parameter updates
+    ParametersSubscribe,
+    ///
     /// Inform clients about the latest server time.
     ///
     /// This allows accelerated, slowed, or stepped control over the progress of time. If the
@@ -208,14 +208,10 @@ pub fn unadvertise(channel_id: ChannelId) -> String {
     .to_string()
 }
 
-#[cfg(feature = "unstable")]
-pub fn parameters_json(
-    parameters: Vec<Parameter>,
-    id: Option<String>,
-) -> Result<String, FoxgloveError> {
-    serde_json::to_value(&ServerMessage::ParameterValues { parameters, id })
-        .map(|value| value.to_string())
-        .map_err(FoxgloveError::JsonError)
+pub fn parameters_json(parameters: &Vec<Parameter>, id: Option<&str>) -> String {
+    // Serialize the parameters to JSON. This shouldn't fail, see serde_json::to_string docs.
+    serde_json::to_string(&ServerMessage::ParameterValues { parameters, id })
+        .expect("Failed to serialize parameters")
 }
 
 #[cfg(test)]
@@ -294,7 +290,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "unstable")]
     #[test]
     fn test_parameter_values_byte_array() {
         let float_param = Parameter {
@@ -323,7 +318,7 @@ mod tests {
         };
 
         let parameters = vec![float_param, float_array_param, byte_array_param, bool_param];
-        let result = parameters_json(parameters, None).unwrap();
+        let result = parameters_json(&parameters, None);
         assert_eq!(
             result,
             json!({
@@ -332,17 +327,17 @@ mod tests {
                     {
                         "name": "f64",
                         "value": 1.23,
-                        "type": "float64"
+                        "type": "float64",
                     },
                     {
                         "name": "f64[]",
+                        "type": "float64_array",
                         "value": [1.23, 4.56],
-                        "type": "float64_array"
                     },
                     {
                         "name": "byte[]",
+                        "type": "byte_array",
                         "value": BASE64_STANDARD.encode(data),
-                        "type": "byte_array"
                     },
                     {
                         "name": "bool",
@@ -354,7 +349,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "unstable")]
     #[test]
     fn test_nested_named_parameter_values() {
         let inner_value = ParameterValue::Dict(HashMap::from([(
@@ -370,7 +364,7 @@ mod tests {
             r#type: None,
         };
         let parameters = vec![outer];
-        let result = parameters_json(parameters, None).unwrap();
+        let result = parameters_json(&parameters, None);
         assert_eq!(
             result,
             json!({
@@ -390,7 +384,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "unstable")]
     #[test]
     fn test_parameter_values_omitting_nulls() {
         let parameters = vec![Parameter {
@@ -398,7 +391,7 @@ mod tests {
             value: None,
             r#type: None,
         }];
-        let result = parameters_json(parameters, None).unwrap();
+        let result = parameters_json(&parameters, None);
         assert_eq!(
             result,
             json!({
