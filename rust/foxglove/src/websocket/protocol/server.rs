@@ -1,7 +1,12 @@
 use crate::channel::Channel;
 use crate::channel::ChannelId;
+use crate::websocket::service::CallId;
+use crate::websocket::service::ServiceId;
+use crate::websocket::service::{self, Service};
 use crate::FoxgloveError;
 use base64::prelude::*;
+use bytes::BufMut;
+use bytes::{Bytes, BytesMut};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
@@ -14,7 +19,7 @@ pub enum BinaryOpcode {
     MessageData = 1,
     #[cfg(feature = "unstable")]
     TimeData = 2,
-    // ServiceCallResponse = 3,
+    ServiceCallResponse = 3,
     // FetchAssetResponse = 4,
 }
 
@@ -151,6 +156,8 @@ pub enum Capability {
     /// same time source.
     #[cfg(feature = "unstable")]
     Time,
+    /// Allow clients to call services.
+    Services,
 }
 
 // https://github.com/foxglove/ws-protocol/blob/main/docs/spec.md#server-info
@@ -208,6 +215,82 @@ pub fn unadvertise(channel_id: ChannelId) -> String {
     .to_string()
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdvertiseService<'a> {
+    id: ServiceId,
+    name: &'a str,
+    r#type: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request: Option<AdvertiseServiceMessageSchema<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_schema: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response: Option<AdvertiseServiceMessageSchema<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_schema: Option<&'a str>,
+}
+
+impl<'a> From<&'a Service> for AdvertiseService<'a> {
+    fn from(service: &'a Service) -> Self {
+        let schema = service.schema();
+        let request = schema.request();
+        let response = schema.response();
+        Self {
+            id: service.id(),
+            name: service.name(),
+            r#type: schema.name(),
+            request: request.map(|r| r.into()),
+            request_schema: if request.is_none() { Some("") } else { None },
+            response: response.map(|r| r.into()),
+            response_schema: if response.is_none() { Some("") } else { None },
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdvertiseServiceMessageSchema<'a> {
+    encoding: &'a str,
+    schema_name: &'a str,
+    schema_encoding: &'a str,
+    schema: &'a [u8],
+}
+
+impl<'a> From<&'a service::MessageSchema> for AdvertiseServiceMessageSchema<'a> {
+    fn from(ms: &'a service::MessageSchema) -> Self {
+        let schema = &ms.schema;
+        Self {
+            encoding: &ms.encoding,
+            schema_name: &schema.name,
+            schema_encoding: &schema.encoding,
+            schema: &schema.data,
+        }
+    }
+}
+
+// https://github.com/foxglove/ws-protocol/blob/main/docs/spec.md#advertise-services
+pub(crate) fn advertise_services<'a>(services: impl IntoIterator<Item = &'a Service>) -> String {
+    let services: Vec<_> = services
+        .into_iter()
+        .map(|s| json!(AdvertiseService::from(s)))
+        .collect();
+    json!({
+        "op": "advertiseServices",
+        "services": services,
+    })
+    .to_string()
+}
+
+// https://github.com/foxglove/ws-protocol/blob/main/docs/spec.md#unadvertise-services
+pub(crate) fn unadvertise_services(ids: &[ServiceId]) -> String {
+    json!({
+        "op": "unadvertiseServices",
+        "serviceIds": ids,
+    })
+    .to_string()
+}
+
 #[cfg(feature = "unstable")]
 pub fn parameters_json(
     parameters: Vec<Parameter>,
@@ -218,8 +301,57 @@ pub fn parameters_json(
         .map_err(FoxgloveError::JsonError)
 }
 
+// https://github.com/foxglove/ws-protocol/blob/main/docs/spec.md#service-call-response
+pub(crate) struct ServiceCallResponse {
+    pub service_id: ServiceId,
+    pub call_id: CallId,
+    pub encoding: String,
+    pub payload: Bytes,
+}
+impl ServiceCallResponse {
+    pub fn new(service_id: ServiceId, call_id: CallId, encoding: String, payload: Bytes) -> Self {
+        Self {
+            service_id,
+            call_id,
+            encoding,
+            payload,
+        }
+    }
+
+    pub fn encode(self) -> Bytes {
+        let encoding_raw = self.encoding.as_bytes();
+        let mut buf = BytesMut::with_capacity(13 + encoding_raw.len() + self.payload.len());
+        buf.put_u8(BinaryOpcode::ServiceCallResponse as u8);
+        buf.put_u32_le(self.service_id.into());
+        buf.put_u32_le(self.call_id.into());
+        buf.put_u32_le(encoding_raw.len() as u32);
+        buf.put(encoding_raw);
+        buf.put(self.payload);
+        buf.into()
+    }
+}
+
+// https://github.com/foxglove/ws-protocol/blob/main/docs/spec.md#service-call-failure
+pub(crate) fn service_call_failure(
+    service_id: ServiceId,
+    call_id: CallId,
+    message: &str,
+) -> String {
+    json!({
+        "op": "serviceCallFailure",
+        "serviceId": service_id,
+        "callId": call_id,
+        "message": message,
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
+    use service::ServiceSchema;
+
+    use crate::Schema;
+
     use super::*;
 
     #[test]
@@ -408,6 +540,113 @@ mod tests {
                         "name": "test"
                     }
                 ]
+            })
+            .to_string()
+        );
+    }
+
+    #[test]
+    fn test_advertise_services() {
+        let s1_schema = ServiceSchema::new("std_srvs/Empty");
+        let s1 = Service::builder("foo", s1_schema)
+            .with_id(ServiceId::new(1))
+            .sync_handler_fn(|_, _| Err("not implemented"));
+
+        let s2_schema = ServiceSchema::new("std_srvs/SetBool")
+            .with_request(
+                "ros1",
+                Schema::new("std_srvs/SetBool_Request", "ros1msg", b"bool data"),
+            )
+            .with_response(
+                "ros1",
+                Schema::new(
+                    "std_srvs/SetBool_Response",
+                    "ros1msg",
+                    b"bool success\nstring message",
+                ),
+            );
+        let s2 = Service::builder("set_bool", s2_schema)
+            .with_id(ServiceId::new(2))
+            .sync_handler_fn(|_, _| Err("not implemented"));
+
+        let adv = advertise_services(&[s1, s2]);
+        assert_eq!(
+            adv,
+            json!({
+                "op": "advertiseServices",
+                "services": [
+                    {
+                        "id": 1,
+                        "name": "foo",
+                        "type": "std_srvs/Empty",
+                        "requestSchema": "",
+                        "responseSchema": ""
+                    },
+                    {
+                        "id": 2,
+                        "name": "set_bool",
+                        "type": "std_srvs/SetBool",
+                        "request": {
+                            "encoding": "ros1",
+                            "schemaName": "std_srvs/SetBool_Request",
+                            "schemaEncoding": "ros1msg",
+                            "schema": b"bool data"
+                        },
+                        "response": {
+                            "encoding": "ros1",
+                            "schemaName": "std_srvs/SetBool_Response",
+                            "schemaEncoding": "ros1msg",
+                            "schema": b"bool success\nstring message"
+                        }
+                    }
+                ]
+            })
+            .to_string()
+        );
+    }
+
+    #[test]
+    fn test_unadvertise_services() {
+        let adv = unadvertise_services(&[ServiceId::new(1), ServiceId::new(2)]);
+        assert_eq!(
+            adv,
+            json!({
+                "op": "unadvertiseServices",
+                "serviceIds": [1, 2],
+            })
+            .to_string()
+        );
+    }
+
+    #[test]
+    fn test_service_call_request() {
+        let msg = ServiceCallResponse::new(
+            ServiceId::new(1),
+            CallId::new(2),
+            "raw".to_string(),
+            Bytes::from_static(b"yolo"),
+        )
+        .encode();
+        let mut buf = BytesMut::new();
+        buf.put_u8(BinaryOpcode::ServiceCallResponse as u8);
+        buf.put_u32_le(1); // service id
+        buf.put_u32_le(2); // call id
+        buf.put_u32_le(3); // encoding length
+        buf.put(b"raw".as_slice());
+        buf.put(b"yolo".as_slice());
+        assert_eq!(msg, buf);
+    }
+
+    #[test]
+    fn test_service_call_failure() {
+        let msg = service_call_failure(ServiceId::new(42), CallId::new(271828), "drat");
+        assert_eq!(
+            msg,
+            json!({
+                "op": "serviceCallFailure",
+                "serviceId": 42,
+                "callId": 271828,
+                "message": "drat",
             })
             .to_string()
         );

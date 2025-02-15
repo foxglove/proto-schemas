@@ -2,13 +2,6 @@
 
 use crate::channel::ChannelId;
 use crate::cow_vec::CowVec;
-pub use crate::websocket::protocol::client::ClientChannelId;
-use crate::websocket::protocol::client::{
-    ClientChannel, ClientMessage, Subscription, SubscriptionId,
-};
-pub use crate::websocket::protocol::server::{Capability, Status, StatusLevel};
-#[cfg(feature = "unstable")]
-pub use crate::websocket::protocol::server::{Parameter, ParameterType, ParameterValue};
 use crate::{get_runtime_handle, Channel, FoxgloveError, LogSink, Metadata};
 use bimap::BiHashMap;
 use bytes::{BufMut, BytesMut};
@@ -34,10 +27,18 @@ use tokio_tungstenite::{
 use tokio_util::sync::CancellationToken;
 
 mod protocol;
+pub mod service;
 #[cfg(test)]
 mod tests;
 #[cfg(all(test, feature = "unstable"))]
 mod unstable_tests;
+
+pub use protocol::client::ClientChannelId;
+use protocol::client::{ClientChannel, ClientMessage, Subscription, SubscriptionId};
+pub use protocol::server::{Capability, Status, StatusLevel};
+#[cfg(feature = "unstable")]
+pub use protocol::server::{Parameter, ParameterType, ParameterValue};
+use service::{CallId, Service, ServiceId};
 
 /// Identifies a client connection. Unique for the duration of the server's lifetime.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -100,6 +101,7 @@ type WebsocketSender = SplitSink<WebSocketStream<TcpStream>, Message>;
 // Queue up to 1024 messages per connected client before dropping messages
 const DEFAULT_MESSAGE_BACKLOG_SIZE: usize = 1024;
 const DEFAULT_CONTROL_PLANE_BACKLOG_SIZE: usize = 64;
+const DEFAULT_SERVICE_CALLS_PER_CLIENT: usize = 32;
 
 #[derive(Error, Debug)]
 enum WSError {
@@ -114,6 +116,7 @@ pub(crate) struct ServerOptions {
     pub message_backlog_size: Option<usize>,
     pub listener: Option<Arc<dyn ServerListener>>,
     pub capabilities: Option<HashSet<Capability>>,
+    pub services: HashMap<String, Service>,
     pub supported_encodings: Option<HashSet<String>>,
     pub runtime: Option<Handle>,
 }
@@ -124,6 +127,7 @@ impl std::fmt::Debug for ServerOptions {
             .field("session_id", &self.session_id)
             .field("name", &self.name)
             .field("message_backlog_size", &self.message_backlog_size)
+            .field("services", &self.services)
             .finish()
     }
 }
@@ -152,10 +156,15 @@ pub(crate) struct Server {
     supported_encodings: HashSet<String>,
     /// Token for cancelling all tasks
     cancellation_token: CancellationToken,
+    /// Registered services.
+    services: parking_lot::RwLock<HashMap<ServiceId, Arc<Service>>>,
 }
 
-/// Provides a mechanism for registering callbacks for
-/// handling client message events.
+/// Provides a mechanism for registering callbacks for handling client message events.
+///
+/// These methods are invoked from the client's main poll loop and must not block. If blocking or
+/// long-running behavior is required, the implementation should use [`tokio::task::spawn`] (or
+/// [`tokio::task::spawn_blocking`]).
 pub trait ServerListener: Send + Sync {
     /// Callback invoked when a client message is received.
     fn on_message_data(
@@ -178,15 +187,17 @@ pub trait ServerListener: Send + Sync {
 }
 
 /// A connected client session with the websocket server.
-struct ConnectedClient {
+pub(crate) struct ConnectedClient {
     id: ClientId,
     addr: SocketAddr,
+    weak_self: Weak<Self>,
     /// Write side of a WS stream
     sender: Mutex<WebsocketSender>,
     data_plane_tx: flume::Sender<Message>,
     data_plane_rx: flume::Receiver<Message>,
     control_plane_tx: flume::Sender<Message>,
     control_plane_rx: flume::Receiver<Message>,
+    service_call_sem: service::Semaphore,
     /// Subscriptions from this client
     subscriptions: parking_lot::Mutex<BiHashMap<ChannelId, SubscriptionId>>,
     /// Channels advertised by this client
@@ -197,6 +208,12 @@ struct ConnectedClient {
 }
 
 impl ConnectedClient {
+    fn arc(&self) -> Arc<Self> {
+        self.weak_self
+            .upgrade()
+            .expect("client cannot be dropped while in use")
+    }
+
     /// Handle a text or binary message sent from the client.
     ///
     /// Standard protocol messages (such as Close) should be handled upstream.
@@ -233,6 +250,7 @@ impl ConnectedClient {
             ClientMessage::Advertise(msg) => self.on_advertise(server, msg.channels),
             ClientMessage::Unadvertise(msg) => self.on_unadvertise(msg.channel_ids),
             ClientMessage::MessageData(msg) => self.on_message_data(msg),
+            ClientMessage::ServiceCallRequest(msg) => self.on_service_call(msg),
             _ => {
                 tracing::error!("Unsupported message from {}: {}", self.addr, msg.op());
                 self.send_error(format!("Unsupported message: {}", msg.op()));
@@ -470,6 +488,66 @@ impl ConnectedClient {
         }
     }
 
+    fn on_service_call(&self, req: protocol::client::ServiceCallRequest) {
+        let Some(server) = self.server.upgrade() else {
+            return;
+        };
+
+        // We have a response channel if and only if the server supports services.
+        let service_id = req.service_id;
+        let call_id = req.call_id;
+        if !server.capabilities.contains(&Capability::Services) {
+            self.send_service_call_failure(service_id, call_id, "Server does not support services");
+            return;
+        };
+
+        // Lookup the requested service handler.
+        let Some(service) = server.get_service(service_id) else {
+            self.send_service_call_failure(service_id, call_id, "Unknown service");
+            return;
+        };
+
+        // If this service declared a request encoding, ensure that it matches. Otherwise, ensure
+        // that the request encoding is in the server's global list of supported encodings.
+        if !service
+            .request_encoding()
+            .map(|e| e == req.encoding)
+            .unwrap_or_else(|| server.supported_encodings.contains(&req.encoding))
+        {
+            self.send_service_call_failure(service_id, call_id, "Unsupported encoding");
+            return;
+        }
+
+        // Acquire the semaphore, or reject if there are too many concurrenct requests.
+        let Some(guard) = self.service_call_sem.try_acquire() else {
+            self.send_service_call_failure(service_id, call_id, "Too many requests");
+            return;
+        };
+
+        // Prepare the responder and the request.
+        let responder = service::Responder::new(
+            self.arc(),
+            service.id(),
+            call_id,
+            service.response_encoding().unwrap_or(&req.encoding),
+            guard,
+        );
+        let request = service::Request::new(service.clone(), call_id, req.encoding, req.payload);
+
+        // Invoke the handler.
+        service.call(Client(self), request, responder);
+    }
+
+    /// Sends a service call failure message to the client with the provided message.
+    fn send_service_call_failure(&self, service_id: ServiceId, call_id: CallId, message: &str) {
+        let msg = Message::text(protocol::server::service_call_failure(
+            service_id, call_id, message,
+        ));
+        if let Err(err) = self.control_plane_tx.try_send(msg) {
+            tracing::error!("Failed to send service call failure: {err}");
+        }
+    }
+
     /// Send an ad hoc error status message to the client, with the given message.
     fn send_error(&self, message: String) {
         self.send_status(Status::new(StatusLevel::Error, message));
@@ -516,6 +594,20 @@ impl Server {
     }
 
     pub fn new(weak_self: Weak<Self>, opts: ServerOptions) -> Self {
+        let mut capabilities = opts.capabilities.unwrap_or_default();
+        let mut supported_encodings = opts.supported_encodings.unwrap_or_default();
+
+        // If the server was declared with services, automatically add the "services" capability
+        // and the set of supported request encodings.
+        if !opts.services.is_empty() {
+            capabilities.insert(Capability::Services);
+            supported_encodings.extend(
+                opts.services
+                    .values()
+                    .flat_map(|svc| svc.schema().request().map(|s| s.encoding.clone())),
+            );
+        }
+
         Server {
             weak_self,
             started: AtomicBool::new(false),
@@ -530,9 +622,15 @@ impl Server {
             name: opts.name.unwrap_or_default(),
             clients: CowVec::new(),
             channels: parking_lot::RwLock::new(HashMap::new()),
-            capabilities: opts.capabilities.unwrap_or_default(),
-            supported_encodings: opts.supported_encodings.unwrap_or_default(),
+            capabilities,
+            supported_encodings,
             cancellation_token: CancellationToken::new(),
+            services: parking_lot::RwLock::new(
+                opts.services
+                    .into_values()
+                    .map(|s| (s.id(), Arc::new(s)))
+                    .collect(),
+            ),
         }
     }
 
@@ -736,6 +834,7 @@ impl Server {
     /// - Handshake
     /// - Send ServerInfo
     /// - Advertise existing channels
+    /// - Advertise existing services
     /// - Listen for client meesages
     async fn handle_connection(self: Arc<Self>, stream: TcpStream, addr: SocketAddr) {
         let ws_stream = match do_handshake(stream).await {
@@ -766,22 +865,23 @@ impl Server {
         let (data_tx, data_rx) = flume::bounded(self.message_backlog_size as usize);
         let (ctrl_tx, ctrl_rx) = flume::bounded(DEFAULT_CONTROL_PLANE_BACKLOG_SIZE);
 
-        let new_client = Arc::new(ConnectedClient {
+        let new_client = Arc::new_cyclic(|weak_self| ConnectedClient {
             id,
             addr,
+            weak_self: weak_self.clone(),
             sender: Mutex::new(ws_sender),
             data_plane_tx: data_tx,
             data_plane_rx: data_rx,
             control_plane_tx: ctrl_tx,
             control_plane_rx: ctrl_rx,
+            service_call_sem: service::Semaphore::new(DEFAULT_SERVICE_CALLS_PER_CLIENT),
             subscriptions: parking_lot::Mutex::new(BiHashMap::new()),
             advertised_channels: parking_lot::Mutex::new(HashMap::new()),
             server_listener: self.listener.clone(),
             server: self.weak_self.clone(),
         });
 
-        self.register_client_and_advertise_channels(new_client.clone())
-            .await;
+        self.register_client_and_advertise(new_client.clone()).await;
 
         let receive_messages = async {
             while let Some(msg) = ws_receiver.next().await {
@@ -823,8 +923,8 @@ impl Server {
                     if self.started.load(Acquire) {
                         tracing::error!("Error sending data message to client {addr}: {err}");
                     } else {
-                        new_client.data_plane_rx.drain();
                         new_client.control_plane_rx.drain();
+                        new_client.data_plane_rx.drain();
                     }
                 }
             }
@@ -846,7 +946,7 @@ impl Server {
         self.clients.retain(|c| !Arc::ptr_eq(c, &new_client));
     }
 
-    async fn register_client_and_advertise_channels(&self, client: Arc<ConnectedClient>) {
+    async fn register_client_and_advertise(&self, client: Arc<ConnectedClient>) {
         // Lock the sender so the channel advertisement is the first message sent
         let mut sender = client.sender.lock().await;
         // Add the client to self.clients
@@ -855,16 +955,14 @@ impl Server {
         // Advertise existing channels to the new client. We must do this AFTER adding the client to clients,
         // otherwise there is potential for the client to miss a new channel advertisement.
         // Create a copy of the channels to avoid holding the lock while sending messages.
-        let mut channels = Vec::<Arc<Channel>>::new();
-        {
-            let channels_map = self.channels.read();
-            channels.extend(channels_map.values().cloned());
-        }
+        let channels: Vec<_> = self.channels.read().values().cloned().collect();
+        let services: Vec<_> = self.services.read().values().cloned().collect();
 
         tracing::info!(
-            "Registered client {}; advertising {} channels",
+            "Registered client {}; advertising {} channels and {} services",
             client.addr,
-            channels.len()
+            channels.len(),
+            services.len(),
         );
 
         for channel in channels.into_iter() {
@@ -889,6 +987,142 @@ impl Server {
                 client.addr
             );
         }
+
+        if !services.is_empty() {
+            let msg = Message::text(protocol::server::advertise_services(
+                services.iter().map(|s| s.as_ref()),
+            ));
+            if let Err(err) = sender.send(msg).await {
+                tracing::error!("Error advertising services: {err}");
+            } else {
+                for service in services {
+                    tracing::debug!(
+                        "Advertised service {} with id {} to client {}",
+                        service.name(),
+                        service.id(),
+                        client.addr
+                    );
+                }
+            }
+        }
+    }
+
+    /// Adds new services, and advertises them to all clients.
+    ///
+    /// This method will fail if the services capability was not declared, or if a service name is
+    /// not unique.
+    pub fn add_services(&self, new_services: Vec<Service>) -> Result<(), FoxgloveError> {
+        // Make sure that the server supports services.
+        if !self.capabilities.contains(&Capability::Services) {
+            return Err(FoxgloveError::ServicesNotSupported);
+        }
+
+        let mut new_names = HashMap::with_capacity(new_services.len());
+        for service in &new_services {
+            // Ensure that the new service names are unique.
+            if new_names
+                .insert(service.name().to_string(), service.id())
+                .is_some()
+            {
+                return Err(FoxgloveError::DuplicateService(service.name().to_string()));
+            }
+
+            // If the service doesn't declare a request encoding, there must be at least one
+            // encoding declared in the global list.
+            if service.request_encoding().is_none() && self.supported_encodings.is_empty() {
+                return Err(FoxgloveError::MissingRequestEncoding(
+                    service.name().to_string(),
+                ));
+            }
+        }
+
+        // Prepare an advertisement.
+        let msg = Message::text(protocol::server::advertise_services(&new_services));
+
+        {
+            // Ensure that the new service names are not already registered.
+            let mut services = self.services.write();
+            for service in services.values() {
+                if new_names.contains_key(service.name()) {
+                    return Err(FoxgloveError::DuplicateService(service.name().to_string()));
+                }
+            }
+
+            // Update the service map.
+            for service in new_services {
+                services.insert(service.id(), Arc::new(service));
+            }
+        }
+
+        // Send advertisements.
+        let clients = self.clients.get();
+        for client in clients.iter().cloned() {
+            for (name, id) in new_names.iter() {
+                tracing::debug!(
+                    "Advertising service {name} with id {id} to client {}",
+                    client.addr
+                );
+            }
+            let msg = msg.clone();
+            self.runtime.spawn(async move {
+                if let Err(err) = client.control_plane_tx.send_async(msg).await {
+                    tracing::error!(
+                        "Error advertising services to client {}: {err}",
+                        client.addr
+                    );
+                }
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Removes services, and unadvertises them to all clients.
+    ///
+    /// Unrecognized service IDs are silently ignored.
+    pub fn remove_services(&self, ids: &[ServiceId]) {
+        // Remove services from the map.
+        let mut old_services = HashMap::with_capacity(ids.len());
+        {
+            let mut services = self.services.write();
+            for id in ids {
+                if let Some(service) = services.remove(id) {
+                    old_services.insert(*id, service.name().to_string());
+                }
+            }
+        }
+        if old_services.is_empty() {
+            return;
+        }
+
+        // Prepare an unadvertisement.
+        let msg = Message::text(protocol::server::unadvertise_services(
+            &old_services.keys().cloned().collect::<Vec<_>>(),
+        ));
+
+        let clients = self.clients.get();
+        for client in clients.iter().cloned() {
+            for (id, name) in old_services.iter() {
+                tracing::debug!(
+                    "Unadvertising service {name} with id {id} to client {}",
+                    client.addr
+                );
+            }
+            let msg = msg.clone();
+            self.runtime.spawn(async move {
+                if let Err(err) = client.control_plane_tx.send_async(msg.clone()).await {
+                    tracing::error!(
+                        "Error unadvertising services to client {}: {err}",
+                        client.addr
+                    );
+                }
+            });
+        }
+    }
+
+    // Looks up a service by ID.
+    fn get_service(&self, id: ServiceId) -> Option<Arc<Service>> {
+        self.services.read().get(&id).cloned()
     }
 }
 

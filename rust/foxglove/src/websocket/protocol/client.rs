@@ -1,7 +1,10 @@
 //! Definitions of client-to-server messages in ws-protocol.
 //! Serializations are derived for testing.
 
-use crate::channel::ChannelId;
+use crate::{
+    channel::ChannelId,
+    websocket::service::{CallId, ServiceId},
+};
 use bytes::{Buf, Bytes};
 use serde::{Deserialize, Serialize};
 
@@ -264,8 +267,8 @@ pub(crate) struct ParameterNames {
 // https://github.com/foxglove/ws-protocol/blob/main/docs/spec.md#service-call-request
 #[derive(Debug, PartialEq)]
 pub(crate) struct ServiceCallRequest {
-    pub service_id: u32,
-    pub call_id: u32,
+    pub service_id: ServiceId,
+    pub call_id: CallId,
     pub encoding: String,
     pub payload: Bytes,
 }
@@ -289,8 +292,8 @@ impl ServiceCallRequest {
         let encoding = std::str::from_utf8(&data[..encoding_length])?.to_string();
         data.advance(encoding_length);
         Ok(Self {
-            service_id,
-            call_id,
+            service_id: ServiceId::new(service_id),
+            call_id: CallId::new(call_id),
             encoding,
             payload: data,
         })
@@ -609,8 +612,8 @@ mod tests {
         assert_eq!(
             parsed,
             Some(ClientMessage::ServiceCallRequest(ServiceCallRequest {
-                service_id: 42,
-                call_id: 314,
+                service_id: ServiceId::new(42),
+                call_id: CallId::new(314),
                 encoding: "raw".into(),
                 payload: Bytes::from_static(b"payload"),
             }))

@@ -56,6 +56,16 @@ impl Schema {
             data: data.into(),
         }
     }
+
+    /// Returns a JSON schema for the specified type.
+    pub fn json_schema<T: schemars::JsonSchema>() -> Self {
+        let json_schema = schemars::schema_for!(T);
+        Self::new(
+            std::any::type_name::<T>(),
+            "jsonschema",
+            serde_json::to_vec(&json_schema).expect("Failed to serialize schema"),
+        )
+    }
 }
 
 /// A log channel that can be used to log binary messages.

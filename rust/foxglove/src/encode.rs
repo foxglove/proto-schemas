@@ -1,8 +1,7 @@
 use crate::{Channel, ChannelBuilder, FoxgloveError, PartialMetadata, Schema};
 use bytes::BufMut;
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
 use serde::Serialize;
-use std::borrow::Cow;
 use std::sync::Arc;
 
 const STACK_BUFFER_SIZE: usize = 128 * 1024;
@@ -43,12 +42,7 @@ impl<T: Serialize + JsonSchema> Encode for T {
     type Error = serde_json::Error;
 
     fn get_schema() -> Option<Schema> {
-        let json_schema = schema_for!(T);
-        Some(Schema::new(
-            std::any::type_name::<T>().to_string(),
-            "jsonschema".to_string(),
-            Cow::Owned(serde_json::to_vec(&json_schema).expect("Failed to serialize schema")),
-        ))
+        Some(Schema::json_schema::<T>())
     }
 
     fn get_message_encoding() -> String {

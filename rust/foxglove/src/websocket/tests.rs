@@ -1,14 +1,19 @@
 use assert_matches::assert_matches;
+use bytes::{BufMut, BytesMut};
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio_tungstenite::tungstenite::{self, http::HeaderValue, Message};
 use tungstenite::client::IntoClientRequest;
 
-use super::{create_server, send_lossy, SendLossyResult, ServerOptions, SUBPROTOCOL};
+use super::{create_server, send_lossy, Capability, SendLossyResult, ServerOptions, SUBPROTOCOL};
 use crate::testutil::RecordingServerListener;
-use crate::{collection, Channel, ChannelBuilder, LogContext, LogSink, Metadata, Schema};
+use crate::websocket::service::{CallId, Service, ServiceId, ServiceSchema};
+use crate::{
+    collection, Channel, ChannelBuilder, FoxgloveError, LogContext, LogSink, Metadata, Schema,
+};
 
 fn make_message(id: usize) -> Message {
     Message::Text(format!("{id}").into())
@@ -519,6 +524,256 @@ async fn test_error_status_message() {
     }
 
     server.stop().await;
+}
+
+#[tokio::test]
+async fn test_service_registration_not_supported() {
+    // Can't register services if we don't declare support.
+    let server = create_server(ServerOptions::default());
+    let svc = Service::builder("/s", ServiceSchema::new("")).sync_handler_fn(|_, _| Err(""));
+    assert_matches!(
+        server.add_services(vec![svc]),
+        Err(FoxgloveError::ServicesNotSupported)
+    );
+}
+
+#[tokio::test]
+async fn test_service_registration_missing_request_encoding() {
+    // Can't register a service with no encoding unless we declare global encodings.
+    let server = create_server(ServerOptions {
+        capabilities: Some(HashSet::from([Capability::Services])),
+        ..Default::default()
+    });
+    let svc = Service::builder("/s", ServiceSchema::new("")).sync_handler_fn(|_, _| Err(""));
+    assert_matches!(
+        server.add_services(vec![svc]),
+        Err(FoxgloveError::MissingRequestEncoding(_))
+    );
+}
+
+#[tokio::test]
+async fn test_service_registration_duplicate_name() {
+    // Can't register a service with no encoding unless we declare global encodings.
+    let sa1 = Service::builder("/a", ServiceSchema::new("")).sync_handler_fn(|_, _| Err(""));
+    let server = create_server(ServerOptions {
+        capabilities: Some(HashSet::from([Capability::Services])),
+        services: HashMap::from([(sa1.name().to_string(), sa1)]),
+        supported_encodings: Some(HashSet::from(["ros1msg".into()])),
+        ..Default::default()
+    });
+
+    let sa2 = Service::builder("/a", ServiceSchema::new("")).sync_handler_fn(|_, _| Err(""));
+    assert_matches!(
+        server.add_services(vec![sa2]),
+        Err(FoxgloveError::DuplicateService(_))
+    );
+
+    let sb1 = Service::builder("/b", ServiceSchema::new("")).sync_handler_fn(|_, _| Err(""));
+    let sb2 = Service::builder("/b", ServiceSchema::new("")).sync_handler_fn(|_, _| Err(""));
+    assert_matches!(
+        server.add_services(vec![sb1, sb2]),
+        Err(FoxgloveError::DuplicateService(_))
+    );
+}
+
+#[tokio::test]
+async fn test_services() {
+    let ok_svc = Service::builder("/ok", ServiceSchema::new("plain"))
+        .with_id(ServiceId::new(1))
+        .handler_fn(|_, req, resp| {
+            assert_eq!(req.service_id(), ServiceId::new(1));
+            assert_eq!(req.service_name(), "/ok");
+            assert_eq!(req.call_id(), CallId::new(99));
+            let payload = req.into_payload();
+            let mut response = BytesMut::with_capacity(payload.len());
+            response.put(payload);
+            response.reverse();
+            // Respond async, for kicks.
+            tokio::spawn(async move { resp.respond(Ok(response.freeze())) });
+        });
+
+    let server = create_server(ServerOptions {
+        services: [ok_svc]
+            .into_iter()
+            .map(|s| (s.name().to_string(), s))
+            .collect(),
+        supported_encodings: Some(HashSet::from(["raw".to_string()])),
+        ..Default::default()
+    });
+
+    let addr = server
+        .start("127.0.0.1", 0)
+        .await
+        .expect("Failed to start server");
+
+    let mut client1 = connect_client(addr.clone()).await;
+    let _ = client1.next().await.expect("No serverInfo sent").unwrap();
+    let msg = client1
+        .next()
+        .await
+        .expect("No service advertisement sent")
+        .unwrap();
+    assert_eq!(
+        msg.into_text().expect("Expected utf8").as_str(),
+        json!({
+            "op": "advertiseServices",
+            "services": [
+                {
+                    "id": 1,
+                    "name": "/ok",
+                    "type": "plain",
+                    "requestSchema": "",
+                    "responseSchema": "",
+                }
+            ]
+        })
+        .to_string()
+    );
+
+    // Send a request.
+    let mut buf = BytesMut::new();
+    buf.put_u8(2); // opcode
+    buf.put_u32_le(1); // service id
+    buf.put_u32_le(99); // call id
+    buf.put_u32_le(3); // encoding length
+    buf.put(b"raw".as_slice());
+    buf.put(b"payload".as_slice());
+    let ok_req = buf.freeze();
+    client1
+        .send(Message::binary(ok_req.clone()))
+        .await
+        .expect("Failed to send");
+
+    // Validate the response.
+    let msg = client1
+        .next()
+        .await
+        .expect("No service call response")
+        .expect("Failed to parse response");
+    let mut buf = BytesMut::new();
+    buf.put_u8(3); // opcode
+    buf.put_u32_le(1); // service id
+    buf.put_u32_le(99); // call id
+    buf.put_u32_le(3); // encoding length
+    buf.put(b"raw".as_slice());
+    buf.put(b"daolyap".as_slice());
+    assert_eq!(msg.into_data(), buf);
+
+    // Register a new service.
+    let err_svc = Service::builder("/err", ServiceSchema::new("plain"))
+        .with_id(ServiceId::new(2))
+        .sync_handler_fn(|_, _| Err("oh noes"));
+    server
+        .add_services(vec![err_svc])
+        .expect("Failed to add service");
+
+    let msg = client1
+        .next()
+        .await
+        .expect("No service advertisement sent")
+        .unwrap();
+    assert_eq!(
+        msg.into_text().expect("Expected utf8").as_str(),
+        json!({
+            "op": "advertiseServices",
+            "services": [
+                {
+                    "id": 2,
+                    "name": "/err",
+                    "type": "plain",
+                    "requestSchema": "",
+                    "responseSchema": "",
+                }
+            ]
+        })
+        .to_string()
+    );
+
+    // Send a request to the error service.
+    let mut buf = BytesMut::new();
+    buf.put_u8(2); // opcode
+    buf.put_u32_le(2); // service id
+    buf.put_u32_le(11); // call id
+    buf.put_u32_le(3); // encoding length
+    buf.put(b"raw".as_slice());
+    buf.put(b"payload".as_slice());
+    client1
+        .send(Message::binary(buf.freeze()))
+        .await
+        .expect("Failed to send");
+
+    // Validate the error response.
+    let msg = client1
+        .next()
+        .await
+        .expect("No service call response")
+        .expect("Failed to parse response");
+    assert_eq!(
+        msg.into_text().expect("Expected utf8").as_str(),
+        json!({
+            "op": "serviceCallFailure",
+            "serviceId": 2,
+            "callId": 11,
+            "message": "oh noes",
+        })
+        .to_string()
+    );
+
+    // New client sees both services immediately.
+    let mut client2 = connect_client(addr.clone()).await;
+    let _ = client2.next().await.expect("No serverInfo sent").unwrap();
+    let msg = client2
+        .next()
+        .await
+        .expect("No service advertisement sent")
+        .unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(msg.into_text().expect("utf8").as_str()).expect("json");
+    let adv_services = value
+        .get("services")
+        .and_then(|s| s.as_array())
+        .expect("services key");
+    assert_eq!(adv_services.len(), 2);
+    drop(client2);
+
+    // Unregister services.
+    server.remove_services(&[ServiceId::new(1)]);
+    let msg = client1
+        .next()
+        .await
+        .expect("No service unadvertisement sent")
+        .unwrap();
+    assert_eq!(
+        msg.into_text().expect("Expected utf8").as_str(),
+        json!({
+            "op": "unadvertiseServices",
+            "serviceIds": [1]
+        })
+        .to_string()
+    );
+
+    // Try to call the now-unregistered service.
+    client1
+        .send(Message::binary(ok_req.clone()))
+        .await
+        .expect("Failed to send");
+
+    // Validate the error response.
+    let msg = client1
+        .next()
+        .await
+        .expect("No service call response")
+        .expect("Failed to parse response");
+    assert_eq!(
+        msg.into_text().expect("Expected utf8").as_str(),
+        json!({
+            "op": "serviceCallFailure",
+            "serviceId": 1,
+            "callId": 99,
+            "message": "Unknown service",
+        })
+        .to_string()
+    );
 }
 
 /// Connect to a server, ensuring the protocol header is set, and return the client WS stream
