@@ -155,7 +155,7 @@ impl PyWebSocketServer {
         server.broadcast_time(timestamp_nanos);
     }
 
-    /// Send a message to all clients.
+    /// Send a status message to all clients.
     pub fn publish_status(&self, status: &PyStatus) {
         let Some(server) = &self.0 else {
             return;

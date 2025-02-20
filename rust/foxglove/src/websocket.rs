@@ -1022,7 +1022,7 @@ impl Server {
         }
     }
 
-    /// Send a message to all clients.
+    /// Send a status message to all clients.
     pub fn publish_status(&self, status: Status) {
         let clients = self.clients.get();
         for client in clients.iter() {
