@@ -126,6 +126,7 @@ impl foxglove::websocket::service::SyncHandler for ServiceHandler {
 /// WebSocket. The default connection string matches the defaults used by the SDK.
 #[pyfunction]
 #[pyo3(signature = (*, name = None, host="127.0.0.1", port=8765, capabilities=None, server_listener=None, supported_encodings=None, services=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn start_server(
     py: Python<'_>,
     name: Option<String>,
@@ -291,8 +292,8 @@ impl PyServiceSchema {
     ) -> Self {
         PyServiceSchema {
             name: name.to_string(),
-            request: request.map(|s| s.clone()),
-            response: response.map(|s| s.clone()),
+            request: request.cloned(),
+            response: response.cloned(),
         }
     }
 }
