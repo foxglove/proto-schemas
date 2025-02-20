@@ -2,7 +2,7 @@
 [project]
 name = "foxglove-sdk-monorepo"
 version = "0.0.0"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 
 [tool.poetry]
 package-mode = false
@@ -10,3 +10,4 @@ package-mode = false
 [tool.poetry.group.dev.dependencies]
 flake8 = "^7.1.1"
 black = "^25.1.0"
+sphinx = "^8.2.0"
