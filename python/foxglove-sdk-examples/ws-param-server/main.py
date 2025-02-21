@@ -1,3 +1,10 @@
+"""
+This implements a parameter server for live visualization.
+
+View and edit parameters from a Parameters panel in Foxglove:
+https://docs.foxglove.dev/docs/visualization/panels/parameters
+"""
+
 import logging
 from typing import Optional
 import foxglove
@@ -66,12 +73,7 @@ def main() -> None:
             websocket_server.publish_parameter_values(store.parameters)
             time.sleep(1)
     except KeyboardInterrupt:
-        # pass
-        exit(0)
-    except Exception as e:
-        print(e)
-
-    # breakpoint()
+        websocket_server.stop()
 
 
 if __name__ == "__main__":
