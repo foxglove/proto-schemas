@@ -36,7 +36,24 @@ class ParameterStore(foxglove.ServerListener):
         request_id: str | None = None,
     ) -> list[foxglove.Parameter]:
         logging.debug(f"on_set_parameters: {parameters}, {client.id}, {request_id}")
-        self.parameters = parameters
+        existing_names = [p.name for p in self.parameters]
+        for changed_param in parameters:
+            if changed_param.name not in existing_names:
+                # Add
+                self.parameters.append(changed_param)
+            elif changed_param.value is None:
+                # Remove
+                self.parameters = [
+                    param
+                    for param in self.parameters
+                    if param.name != changed_param.name
+                ]
+            else:
+                # Update
+                self.parameters = [
+                    param if param.name != changed_param.name else changed_param
+                    for param in self.parameters
+                ]
         return parameters
 
 
