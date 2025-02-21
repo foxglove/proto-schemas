@@ -10,20 +10,6 @@ use pyo3::{
 use std::sync::Arc;
 use std::time;
 
-/// A mechanism to register callbacks for handling client message events.
-#[pyclass(name = "ServerListener", module = "foxglove")]
-pub struct PyServerListener {
-    listener: Py<PyAny>,
-}
-
-#[pymethods]
-impl PyServerListener {
-    #[new]
-    fn new(listener: Py<PyAny>) -> Self {
-        PyServerListener { listener }
-    }
-}
-
 /// A client connected to a running websocket server.
 #[pyclass(name = "Client", module = "foxglove")]
 pub struct PyClient {
@@ -40,6 +26,8 @@ pub struct PyClientChannelView {
     topic: Py<PyString>,
 }
 
+/// A mechanism to register callbacks for handling client message events.
+///
 /// Implementations of ServerListener which call the python methods. foxglove/__init__.py defines
 /// the `ServerListener` protocol for callers, since a `pyclass` cannot extend Python classes:
 /// https://github.com/PyO3/pyo3/issues/991
@@ -49,6 +37,10 @@ pub struct PyClientChannelView {
 ///
 /// Methods on the listener interface do not return Results; any errors are logged, assuming the
 /// user has enabled logging.
+pub struct PyServerListener {
+    listener: Py<PyAny>,
+}
+
 impl ServerListener for PyServerListener {
     fn on_message_data(&self, client: Client, channel: ClientChannelView, payload: &[u8]) {
         let client_info = PyClient {
@@ -110,7 +102,7 @@ pub fn start_server(
         .bind(host, port);
 
     if let Some(py_obj) = server_listener {
-        let listener = PyServerListener::new(py_obj);
+        let listener = PyServerListener { listener: py_obj };
         server = server.listener(Arc::new(listener));
     }
 

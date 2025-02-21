@@ -10,7 +10,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::sync::Arc;
 use websocket_server::{
-    start_server, PyCapability, PyClient, PyClientChannelView, PyServerListener, PyWebSocketServer,
+    start_server, PyCapability, PyClient, PyClientChannelView, PyWebSocketServer,
 };
 
 mod errors;
@@ -208,7 +208,6 @@ fn _foxglove_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Websocket server classes
     m.add_class::<PyWebSocketServer>()?;
-    m.add_class::<PyServerListener>()?;
     m.add_class::<PyCapability>()?;
     m.add_class::<PyClient>()?;
     m.add_class::<PyClientChannelView>()?;
