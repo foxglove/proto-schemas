@@ -7,8 +7,8 @@ use pyo3::{
     prelude::*,
     types::{PyBytes, PyString},
 };
-use std::sync::Arc;
 use std::time;
+use std::{collections::HashMap, sync::Arc};
 
 /// A client connected to a running websocket server.
 #[pyclass(name = "Client", module = "foxglove")]
@@ -153,6 +153,13 @@ impl PyWebSocketServer {
         }
         Ok(())
     }
+
+    /// Publishes parameter values to all clients.
+    pub fn publish_parameter_values(&self, parameters: Vec<PyParameter>) {
+        if let Some(server) = &self.0 {
+            server.publish_parameter_values(parameters.into_iter().map(Into::into).collect());
+        }
+    }
 }
 
 /// A capability that the websocket server advertises to its clients.
@@ -177,6 +184,103 @@ impl From<PyCapability> for foxglove::websocket::Capability {
             PyCapability::ClientPublish => foxglove::websocket::Capability::ClientPublish,
             // PyCapability::Parameters => foxglove::websocket::Capability::Parameters,
             PyCapability::Time => foxglove::websocket::Capability::Time,
+        }
+    }
+}
+
+#[pyclass(name = "ParameterType", module = "foxglove", eq, eq_int)]
+#[derive(Clone, PartialEq)]
+pub enum PyParameterType {
+    /// A byte array, encoded as a base64-encoded string.
+    ByteArray,
+    /// A decimal or integer value that can be represented as a `float64`.
+    Float64,
+    /// An array of decimal or integer values that can be represented as `float64`s.
+    Float64Array,
+}
+
+impl From<PyParameterType> for foxglove::websocket::ParameterType {
+    fn from(value: PyParameterType) -> Self {
+        match value {
+            PyParameterType::ByteArray => foxglove::websocket::ParameterType::ByteArray,
+            PyParameterType::Float64 => foxglove::websocket::ParameterType::Float64,
+            PyParameterType::Float64Array => foxglove::websocket::ParameterType::Float64Array,
+        }
+    }
+}
+
+/// A parameter value.
+#[pyclass(name = "ParameterValue", module = "foxglove")]
+#[derive(Clone)]
+pub enum PyParameterValue {
+    /// A decimal or integer value.
+    Number(f64),
+    /// A boolean value.
+    Bool(bool),
+    /// A byte array, encoded as a base64-encoded string.
+    String(Vec<u8>),
+    /// An array of parameter values.
+    Array(Vec<PyParameterValue>),
+    /// An associative map of parameter values.
+    Dict(HashMap<String, PyParameterValue>),
+}
+
+impl From<PyParameterValue> for foxglove::websocket::ParameterValue {
+    fn from(value: PyParameterValue) -> Self {
+        match value {
+            PyParameterValue::Number(n) => foxglove::websocket::ParameterValue::Number(n),
+            PyParameterValue::Bool(b) => foxglove::websocket::ParameterValue::Bool(b),
+            PyParameterValue::String(items) => foxglove::websocket::ParameterValue::String(items),
+            PyParameterValue::Array(py_parameter_values) => {
+                foxglove::websocket::ParameterValue::Array(
+                    py_parameter_values.into_iter().map(Into::into).collect(),
+                )
+            }
+            PyParameterValue::Dict(hash_map) => foxglove::websocket::ParameterValue::Dict(
+                hash_map.into_iter().map(|(k, v)| (k, v.into())).collect(),
+            ),
+        }
+    }
+}
+
+/// A parameter which can be sent to a client.
+#[pyclass(name = "Parameter", module = "foxglove")]
+#[derive(Clone)]
+pub struct PyParameter {
+    /// The name of the parameter.
+    #[pyo3(get)]
+    pub name: String,
+    /// The parameter type.
+    #[pyo3(get)]
+    pub r#type: Option<PyParameterType>,
+    /// The parameter value.
+    #[pyo3(get)]
+    pub value: Option<PyParameterValue>,
+}
+
+#[pymethods]
+impl PyParameter {
+    #[new]
+    #[pyo3(signature = (name, r#type=None, value=None))]
+    pub fn new(
+        name: String,
+        r#type: Option<PyParameterType>,
+        value: Option<PyParameterValue>,
+    ) -> Self {
+        Self {
+            name,
+            r#type,
+            value,
+        }
+    }
+}
+
+impl From<PyParameter> for foxglove::websocket::Parameter {
+    fn from(value: PyParameter) -> Self {
+        Self {
+            name: value.name,
+            r#type: value.r#type.map(Into::into),
+            value: value.value.map(Into::into),
         }
     }
 }
