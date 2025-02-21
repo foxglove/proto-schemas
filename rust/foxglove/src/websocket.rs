@@ -207,6 +207,9 @@ pub trait ServerListener: Send + Sync {
     /// Should return the updated parameters for the passed parameters.
     /// The implementation could return the modified parameters.
     /// All clients subscribed to updates for the _returned_ parameters will be notified.
+    ///
+    /// Note that only `parameters` which have changed are included in the callback, but the return
+    /// value must include all parameters.
     fn on_set_parameters(
         &self,
         _client: Client,
@@ -1009,7 +1012,7 @@ impl Server {
         }
     }
 
-    /// Publish parameter values to all clients.
+    /// Publish parameter values to all subscribed clients.
     pub fn publish_parameter_values(&self, parameters: Vec<Parameter>) {
         if !self.capabilities.contains(&Capability::Parameters) {
             tracing::error!("Server does not support parameters capability");

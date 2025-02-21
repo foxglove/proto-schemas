@@ -12,6 +12,9 @@ from ._foxglove_py import (
     ClientChannelView,
     Client,
     MCAPWriter,
+    Parameter,
+    ParameterType,
+    ParameterValue,
     WebSocketServer,
     record_file,
     enable_logging,
@@ -49,7 +52,31 @@ class ServerListener(Protocol):
         :param channel: The channel (id, topic) that the message was sent on.
         :param data: The message data.
         """
-        pass
+        return None
+
+    def on_get_parameters(
+        self,
+        client: Client,
+        param_names: List[str],
+        request_id: Optional[str] = None,
+    ) -> List["Parameter"]:
+        """
+        Called by the server when a client requests parameters.
+        """
+        return []
+
+    def on_set_parameters(
+        self,
+        client: Client,
+        parameters: List["Parameter"],
+        request_id: Optional[str] = None,
+    ) -> List["Parameter"]:
+        """
+        Called by the server when a client sets parameters.
+        Note that only `parameters` which have changed are included in the callback, but the return
+        value must include all parameters.
+        """
+        return parameters
 
 
 def start_server(
@@ -131,6 +158,9 @@ __all__ = [
     "Capability",
     "Channel",
     "MCAPWriter",
+    "Parameter",
+    "ParameterType",
+    "ParameterValue",
     "SchemaDefinition",
     "ServerListener",
     "WebSocketServer",

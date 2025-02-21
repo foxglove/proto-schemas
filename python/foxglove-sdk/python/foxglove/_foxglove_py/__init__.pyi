@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Any, List, Optional, Protocol, Tuple
+from typing import Any, List, Optional, Protocol, Tuple, Union
 
 class MCAPWriter:
     """
@@ -27,6 +27,7 @@ class WebSocketServer:
     def stop(self) -> None: ...
     def clear_session(self, session_id: Optional[str] = None) -> None: ...
     def broadcast_time(self, timestamp_nanos: int) -> None: ...
+    def publish_parameter_values(self, parameters: List["Parameter"]) -> None: ...
 
 class BaseChannel:
     """
@@ -80,6 +81,7 @@ class Capability(Enum):
 
     Time = ...
     ClientPublish = ...
+    Parameters = ...
 
 class Client:
     """
@@ -95,6 +97,64 @@ class ClientChannelView:
 
     id = ...
     topic = ...
+
+class Parameter:
+    """
+    A parameter.
+    """
+
+    name: str
+    type: Optional["ParameterType"]
+    value: Optional["AnyParameterValue"]
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        type: Optional["ParameterType"] = None,
+        value: Optional["AnyParameterValue"] = None,
+    ) -> None: ...
+
+class ParameterType(Enum):
+    """
+    The type of a parameter.
+    """
+
+    ByteArray = ...
+    Float64 = ...
+    Float64Array = ...
+
+class ParameterValue:
+    """
+    The value of a parameter.
+    """
+
+    class Bool:
+        def __new__(cls, value: bool) -> "ParameterValue.Bool": ...
+
+    class Number:
+        def __new__(cls, value: float) -> "ParameterValue.Number": ...
+
+    class Bytes:
+        def __new__(cls, value: bytes) -> "ParameterValue.Bytes": ...
+
+    class Array:
+        def __new__(
+            cls, value: List["AnyParameterValue"]
+        ) -> "ParameterValue.Array": ...
+
+    class Dict:
+        def __new__(
+            cls, value: dict[str, "AnyParameterValue"]
+        ) -> "ParameterValue.Dict": ...
+
+AnyParameterValue = Union[
+    ParameterValue.Bool,
+    ParameterValue.Number,
+    ParameterValue.Bytes,
+    ParameterValue.Array,
+    ParameterValue.Dict,
+]
 
 def start_server(
     name: Optional[str] = None,
