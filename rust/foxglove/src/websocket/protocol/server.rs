@@ -19,6 +19,8 @@ pub enum BinaryOpcode {
     TimeData = 2,
     ServiceCallResponse = 3,
     // FetchAssetResponse = 4,
+    // ServiceCallResponse = 3,
+    FetchAssetResponse = 4,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -157,6 +159,8 @@ pub enum Capability {
     Time,
     /// Allow clients to call services.
     Services,
+    /// Allow clients to request assets.
+    Assets,
 }
 
 // https://github.com/foxglove/ws-protocol/blob/main/docs/spec.md#server-info

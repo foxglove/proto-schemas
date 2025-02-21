@@ -32,6 +32,7 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod asset_responder;
 mod protocol;
 pub mod service;
 #[cfg(test)]
@@ -39,6 +40,7 @@ mod tests;
 #[cfg(all(test, feature = "unstable"))]
 mod unstable_tests;
 
+pub use asset_responder::AssetResponder;
 use service::{CallId, Service, ServiceId};
 
 /// Identifies a client connection. Unique for the duration of the server's lifetime.
@@ -53,12 +55,43 @@ impl From<ClientId> for u32 {
 
 /// A connected client session with the websocket server.
 #[derive(Debug)]
-pub struct Client<'a>(&'a ConnectedClient);
+pub struct Client {
+    id: ClientId,
+    client: Weak<ConnectedClient>,
+}
 
-impl Client<'_> {
+impl Client {
+    pub(crate) fn new(client: &ConnectedClient) -> Self {
+        Self {
+            id: client.id,
+            client: client.weak_self.clone(),
+        }
+    }
+
     /// Returns the client ID.
     pub fn id(&self) -> ClientId {
-        self.0.id
+        self.id
+    }
+
+    /// Send a status message to this client.
+    pub fn send_status(&self, status: Status) {
+        if let Some(client) = self.client.upgrade() {
+            client.send_status(status);
+        }
+    }
+
+    /// Send a fetch asset error response to the client.
+    pub(crate) fn send_asset_error(&self, error: &str, request_id: u32) {
+        if let Some(client) = self.client.upgrade() {
+            client.send_asset_error(error, request_id);
+        }
+    }
+
+    /// Send a successful fetch asset response to the client.
+    pub(crate) fn send_asset_response(&self, response: &[u8], request_id: u32) {
+        if let Some(client) = self.client.upgrade() {
+            client.send_asset_response(response, request_id);
+        }
     }
 }
 
@@ -219,6 +252,8 @@ pub trait ServerListener: Send + Sync {
     fn on_parameters_subscribe(&self, _param_names: Vec<String>) {}
     /// Callback invoked when a client unsubscribes from parameters. Requires [`Capability::ParametersSubscribe`].
     fn on_parameters_unsubscribe(&self, _param_names: Vec<String>) {}
+    /// Callback invoked when a client requests an asset.
+    fn on_fetch_asset(&self, _uri: String, _responder: AssetResponder) {}
 }
 
 /// A connected client session with the websocket server.
@@ -301,6 +336,7 @@ impl ConnectedClient {
                 self.on_parameters_unsubscribe(server, msg.parameter_names)
             }
             ClientMessage::ServiceCallRequest(msg) => self.on_service_call(msg),
+            ClientMessage::FetchAsset(msg) => self.on_fetch_asset(server, msg.uri, msg.request_id),
             _ => {
                 tracing::error!("Unsupported message from {}: {}", self.addr, msg.op());
                 self.send_error(format!("Unsupported message: {}", msg.op()));
@@ -379,7 +415,7 @@ impl ConnectedClient {
         // Call the handler after releasing the advertised_channels lock
         if let Some(handler) = self.server_listener.as_ref() {
             handler.on_message_data(
-                Client(self),
+                Client::new(self),
                 ClientChannelView {
                     id: client_channel.id,
                     topic: &client_channel.topic,
@@ -414,7 +450,7 @@ impl ConnectedClient {
         if let Some(handler) = self.server_listener.as_ref() {
             for (id, client_channel) in channel_ids.iter().cloned().zip(client_channels) {
                 handler.on_client_unadvertise(
-                    Client(self),
+                    Client::new(self),
                     ClientChannelView {
                         id,
                         topic: &client_channel.topic,
@@ -452,7 +488,7 @@ impl ConnectedClient {
             // Call the handler after releasing the advertised_channels lock
             if let Some(handler) = self.server_listener.as_ref() {
                 handler.on_client_advertise(
-                    Client(self),
+                    Client::new(self),
                     ClientChannelView {
                         id: client_channel.id,
                         topic: &client_channel.topic,
@@ -493,7 +529,7 @@ impl ConnectedClient {
         // Finally call the handler for each channel
         for channel in unsubscribed_channels {
             handler.on_unsubscribe(
-                Client(self),
+                Client::new(self),
                 ChannelView {
                     id: channel.id,
                     topic: &channel.topic,
@@ -559,7 +595,7 @@ impl ConnectedClient {
             );
             if let Some(handler) = self.server_listener.as_ref() {
                 handler.on_subscribe(
-                    Client(self),
+                    Client::new(self),
                     ChannelView {
                         id: channel.id,
                         topic: &channel.topic,
@@ -582,7 +618,7 @@ impl ConnectedClient {
 
         if let Some(handler) = self.server_listener.as_ref() {
             let request_id = request_id.as_deref();
-            let parameters = handler.on_get_parameters(Client(self), param_names, request_id);
+            let parameters = handler.on_get_parameters(Client::new(self), param_names, request_id);
             let message = protocol::server::parameters_json(&parameters, request_id);
             let _ = self.control_plane_tx.try_send(Message::text(message));
         }
@@ -602,7 +638,7 @@ impl ConnectedClient {
         let updated_parameters = if let Some(handler) = self.server_listener.as_ref() {
             let request_id = request_id.as_deref();
             let updated_parameters =
-                handler.on_set_parameters(Client(self), parameters, request_id);
+                handler.on_set_parameters(Client::new(self), parameters, request_id);
             // Send all the updated_parameters back to the client if request_id is provided.
             // This is the behavior of the reference Python server implementation.
             if request_id.is_some() {
@@ -769,7 +805,7 @@ impl ConnectedClient {
         let request = service::Request::new(service.clone(), call_id, req.encoding, req.payload);
 
         // Invoke the handler.
-        service.call(Client(self), request, responder);
+        service.call(Client::new(self), request, responder);
     }
 
     /// Sends a service call failure message to the client with the provided message.
@@ -778,6 +814,18 @@ impl ConnectedClient {
             service_id, call_id, message,
         ));
         self.send_control_msg(msg);
+    }
+
+    fn on_fetch_asset(&self, server: Arc<Server>, uri: String, request_id: u32) {
+        if !server.capabilities.contains(&Capability::Assets) {
+            self.send_error("Server does not support assets capability".to_string());
+            return;
+        }
+
+        let asset_responder = AssetResponder::new(Client::new(self), request_id);
+        if let Some(handler) = self.server_listener.as_ref() {
+            handler.on_fetch_asset(uri, asset_responder);
+        }
     }
 
     /// Send an ad hoc error status message to the client, with the given message.
@@ -802,6 +850,30 @@ impl ConnectedClient {
                 self.send_control_msg(message);
             }
         }
+    }
+
+    /// Send a fetch asset error to the client. Called from AssetResponder.
+    fn send_asset_error(&self, error: &str, request_id: u32) {
+        // https://github.com/foxglove/ws-protocol/blob/main/docs/spec.md#fetch-asset-response
+        let mut buf = Vec::with_capacity(10 + error.len());
+        buf.put_u8(protocol::server::BinaryOpcode::FetchAssetResponse as u8);
+        buf.put_u32_le(request_id);
+        buf.put_u8(1); // 1 for error
+        buf.put(error.as_bytes());
+        let message = Message::binary(buf);
+        self.send_control_msg(message);
+    }
+
+    /// Send a fetch asset response to the client. Called from AssetResponder.
+    fn send_asset_response(&self, response: &[u8], request_id: u32) {
+        // https://github.com/foxglove/ws-protocol/blob/main/docs/spec.md#fetch-asset-response
+        let mut buf = Vec::with_capacity(10 + response.len());
+        buf.put_u8(protocol::server::BinaryOpcode::FetchAssetResponse as u8);
+        buf.put_u32_le(request_id);
+        buf.put_u8(0); // 0 for success
+        buf.put(response);
+        let message = Message::binary(buf);
+        self.send_control_msg(message);
     }
 }
 

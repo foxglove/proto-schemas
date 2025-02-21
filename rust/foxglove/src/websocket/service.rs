@@ -178,7 +178,7 @@ impl Service {
     }
 
     /// Invokes the service call implementation.
-    pub(crate) fn call(&self, client: Client<'_>, request: Request, responder: Responder) {
+    pub(crate) fn call(&self, client: Client, request: Request, responder: Responder) {
         self.handler.call(client, request, responder);
     }
 }

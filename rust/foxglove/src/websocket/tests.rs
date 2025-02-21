@@ -1275,6 +1275,67 @@ async fn test_services() {
     );
 }
 
+#[tokio::test]
+async fn test_fetch_asset() {
+    let recording_listener = Arc::new(RecordingServerListener::new());
+
+    let server = create_server(ServerOptions {
+        listener: Some(recording_listener.clone()),
+        capabilities: Some(HashSet::from([Capability::Assets])),
+        ..Default::default()
+    });
+    let addr = server
+        .start("127.0.0.1", 0)
+        .await
+        .expect("Failed to start server");
+
+    let mut ws_client = connect_client(addr).await;
+    let _ = ws_client.next().await.expect("No serverInfo sent");
+
+    let fetch_asset = json!({
+        "op": "fetchAsset",
+        "uri": "https://example.com/asset.png",
+        "requestId": 1,
+    });
+    ws_client
+        .send(Message::text(fetch_asset.to_string()))
+        .await
+        .expect("Failed to send fetch asset");
+    let fetch_asset_err = json!({
+        "op": "fetchAsset",
+        "uri": "https://example.com/error",
+        "requestId": 2,
+    });
+    ws_client
+        .send(Message::text(fetch_asset_err.to_string()))
+        .await
+        .expect("Failed to send fetch asset");
+
+    // FG-10395 replace this with something more precise
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let result = ws_client.next().await.unwrap();
+    let msg = result.expect("Failed to parse message");
+    let data = msg.into_data();
+    assert_eq!(data[0], 0x04); // fetch asset opcode
+    assert_eq!(u32::from_le_bytes(data[1..=4].try_into().unwrap()), 1);
+    assert_eq!(data[5], 0); // 0 for success
+    assert_eq!(&data[6..], b"test data");
+
+    let result = ws_client.next().await.unwrap();
+    let msg = result.expect("Failed to parse message");
+    let data = msg.into_data();
+    assert_eq!(data[0], 0x04); // fetch asset opcode
+    assert_eq!(u32::from_le_bytes(data[1..=4].try_into().unwrap()), 2);
+    assert_eq!(data[5], 1); // 1 for error
+    assert_eq!(&data[6..], b"test error");
+
+    let fetch_asset = recording_listener.take_fetch_asset();
+    assert_eq!(fetch_asset.len(), 2);
+    assert_eq!(fetch_asset[0], "https://example.com/asset.png");
+    assert_eq!(fetch_asset[1], "https://example.com/error");
+}
+
 /// Connect to a server, ensuring the protocol header is set, and return the client WS stream
 pub async fn connect_client(
     addr: String,

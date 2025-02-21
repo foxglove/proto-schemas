@@ -533,6 +533,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-ws-server-fetch-asset"
+version = "0.0.0"
+dependencies = [
+ "clap",
+ "env_logger",
+ "foxglove",
+ "tokio",
+]
+
+[[package]]
 name = "example-ws-services"
 version = "0.0.0"
 dependencies = [

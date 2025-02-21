@@ -5,7 +5,8 @@ mod log_sink;
 
 use crate::channel::ChannelId;
 use crate::websocket::{
-    ChannelView, Client, ClientChannelId, ClientChannelView, ClientId, Parameter, ServerListener,
+    AssetResponder, ChannelView, Client, ClientChannelId, ClientChannelView, ClientId, Parameter,
+    ServerListener,
 };
 pub use log_context::GlobalContextTest;
 pub use log_sink::{ErrorSink, MockSink, RecordingSink};
@@ -72,6 +73,7 @@ pub(crate) struct RecordingServerListener {
     parameters_get: Mutex<Vec<GetParameters>>,
     parameters_set: Mutex<Vec<SetParameters>>,
     parameters_get_result: Mutex<Vec<Parameter>>,
+    fetch_asset: Mutex<Vec<String>>,
 }
 
 impl RecordingServerListener {
@@ -87,6 +89,7 @@ impl RecordingServerListener {
             parameters_get: Mutex::new(Vec::new()),
             parameters_set: Mutex::new(Vec::new()),
             parameters_get_result: Mutex::new(Vec::new()),
+            fetch_asset: Mutex::new(Vec::new()),
         }
     }
 
@@ -128,6 +131,10 @@ impl RecordingServerListener {
 
     pub fn take_parameters_set(&self) -> Vec<SetParameters> {
         std::mem::take(&mut self.parameters_set.lock())
+    }
+
+    pub fn take_fetch_asset(&self) -> Vec<String> {
+        std::mem::take(&mut self.fetch_asset.lock())
     }
 }
 
@@ -199,5 +206,16 @@ impl ServerListener for RecordingServerListener {
     fn on_parameters_unsubscribe(&self, param_names: Vec<String>) {
         let mut unsubs = self.parameters_unsubscribe.lock();
         unsubs.push(param_names.clone());
+    }
+
+    fn on_fetch_asset(&self, uri: String, responder: AssetResponder) {
+        let mut fetches = self.fetch_asset.lock();
+        let return_error = uri.ends_with("error");
+        fetches.push(uri);
+        if return_error {
+            responder.send_error("test error");
+        } else {
+            responder.send_data(b"test data");
+        }
     }
 }
