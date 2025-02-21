@@ -5,7 +5,7 @@ use foxglove::{
 };
 use pyo3::{
     prelude::*,
-    types::{PyBytes, PyDict, PyString},
+    types::{PyBytes, PyString},
 };
 use std::sync::Arc;
 use std::time;
@@ -61,14 +61,11 @@ impl ServerListener for PyServerListener {
                 topic: PyString::new(py, channel.topic()).into(),
             };
 
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("client", client_info)?;
-            kwargs.set_item("channel", channel_view)?;
-            kwargs.set_item("data", PyBytes::new(py, payload))?;
-
+            // client, channel, data
+            let args = (client_info, channel_view, PyBytes::new(py, payload));
             self.listener
                 .bind(py)
-                .call_method("on_message_data", (), Some(&kwargs))?;
+                .call_method("on_message_data", args, None)?;
 
             Ok(())
         });
