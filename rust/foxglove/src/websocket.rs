@@ -1009,7 +1009,7 @@ impl Server {
         }
     }
 
-    /// Publish parameter values to all clients.
+    /// Publish parameter values to all subscribed clients.
     pub fn publish_parameter_values(&self, parameters: Vec<Parameter>) {
         if !self.capabilities.contains(&Capability::Parameters) {
             tracing::error!("Server does not support parameters capability");
