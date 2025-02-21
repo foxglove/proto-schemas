@@ -9,6 +9,10 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::BufWriter;
 use std::sync::Arc;
+use websocket_server::PyMessageSchema;
+use websocket_server::PySchema;
+use websocket_server::PyService;
+use websocket_server::PyServiceSchema;
 use websocket_server::{
     start_server, PyCapability, PyClient, PyClientChannelView, PyWebSocketServer,
 };
@@ -211,6 +215,11 @@ fn _foxglove_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCapability>()?;
     m.add_class::<PyClient>()?;
     m.add_class::<PyClientChannelView>()?;
+    // Services
+    m.add_class::<PyService>()?;
+    m.add_class::<PyServiceSchema>()?;
+    m.add_class::<PyMessageSchema>()?;
+    m.add_class::<PySchema>()?;
 
     // Register the schema & channel modules
     // A declarative submodule is created in generated/schemas_module.rs, but this is currently

@@ -7,7 +7,7 @@ schemas.
 
 import atexit
 from contextlib import contextmanager
-from typing import Iterator, List, Optional, Protocol, Union
+from typing import Callable, Iterator, List, Optional, Protocol, Union
 from ._foxglove_py import (
     ClientChannelView,
     Client,
@@ -18,6 +18,10 @@ from ._foxglove_py import (
     disable_logging,
     shutdown,
     Capability,
+    Service,
+    ServiceSchema,
+    MessageSchema,
+    Schema,
 )
 
 from ._foxglove_py import start_server as _start_server
@@ -52,6 +56,9 @@ class ServerListener(Protocol):
         pass
 
 
+ServiceHandler = Callable[["Client", str, int, str, bytes], bytes]
+
+
 def start_server(
     name: Optional[str] = None,
     host: Optional[str] = "127.0.0.1",
@@ -59,6 +66,7 @@ def start_server(
     capabilities: Optional[List[Capability]] = None,
     server_listener: Optional[ServerListener] = None,
     supported_encodings: Optional[List[str]] = None,
+    services: Optional[List[Service]] = None,
 ) -> WebSocketServer:
     """
     Start a websocket server for live visualization.
@@ -69,6 +77,7 @@ def start_server(
     :param capabilities: A list of capabilities to advertise to clients.
     :param server_listener: A Python object that implements the :py:class:`ServerListener` protocol.
     :param supported_encodings: A list of encodings to advertise to clients.
+    :param services: A list of services to advertise to clients.
     """
     return _start_server(
         name=name,
@@ -77,6 +86,7 @@ def start_server(
         capabilities=capabilities,
         server_listener=server_listener,
         supported_encodings=supported_encodings,
+        services=services,
     )
 
 
@@ -140,4 +150,9 @@ __all__ = [
     "start_server",
     "verbose_off",
     "verbose_on",
+    "Service",
+    "ServiceSchema",
+    "MessageSchema",
+    "Schema",
+    "ServiceHandler",
 ]
