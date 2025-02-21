@@ -73,7 +73,8 @@ class ServerListener(Protocol):
     ) -> List["Parameter"]:
         """
         Called by the server when a client sets parameters.
-        The implementation could modify the parameters, and must return the current list.
+        Note that only `parameters` which have changed are included in the callback, but the return
+        value must include all parameters.
         """
         return parameters
 

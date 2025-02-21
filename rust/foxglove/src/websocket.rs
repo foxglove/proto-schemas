@@ -207,6 +207,9 @@ pub trait ServerListener: Send + Sync {
     /// Should return the updated parameters for the passed parameters.
     /// The implementation could return the modified parameters.
     /// All clients subscribed to updates for the _returned_ parameters will be notified.
+    ///
+    /// Note that only `parameters` which have changed are included in the callback, but the return
+    /// value must include all parameters.
     fn on_set_parameters(
         &self,
         _client: Client,
