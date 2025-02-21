@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 import struct
 import foxglove
@@ -57,8 +58,8 @@ class ExampleListener(foxglove.ServerListener):
         channel: foxglove.ClientChannelView,
         data: bytes,
     ) -> None:
-        print(f"Message from client {client.id} on channel {channel.topic}")
-        print(f"Data: {data!r}")
+        logging.info(f"Message from client {client.id} on channel {channel.topic}")
+        logging.info(f"Data: {data!r}")
 
 
 def main() -> None:

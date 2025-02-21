@@ -5,7 +5,7 @@ use foxglove::{
 };
 use pyo3::{
     prelude::*,
-    types::{PyBytes, PyDict},
+    types::{PyBytes, PyDict, PyString},
 };
 use std::sync::Arc;
 use std::time;
@@ -37,7 +37,7 @@ pub struct PyClientChannelView {
     #[pyo3(get)]
     id: u32,
     #[pyo3(get)]
-    topic: String,
+    topic: Py<PyString>,
 }
 
 /// Implementations of ServerListener which call the python methods. foxglove/__init__.py defines
@@ -55,12 +55,12 @@ impl ServerListener for PyServerListener {
             id: client.id().into(),
         };
 
-        let channel_view = PyClientChannelView {
-            id: channel.id().into(),
-            topic: channel.topic().to_string(),
-        };
-
         let result: PyResult<()> = Python::with_gil(|py| {
+            let channel_view = PyClientChannelView {
+                id: channel.id().into(),
+                topic: PyString::new(py, channel.topic()).into(),
+            };
+
             let kwargs = PyDict::new(py);
             kwargs.set_item("client", client_info)?;
             kwargs.set_item("channel", channel_view)?;
